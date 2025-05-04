@@ -9,7 +9,7 @@ LD = $(CC)
 
 # Configure Debug or Release build
 CFLAGS = -std=gnu++17 -Wall -pthread
-LDFLAGS = -pthread
+LDFLAGS = -pthread -Wl,-rpath,'$$ORIGIN/protobuf/lib'
 
 ifeq "$(DEBUG)" "true"
   # Debug build
@@ -40,10 +40,9 @@ INCS = -I$(PROJECT_HOME) \
        -I$(PROTO_OUT)
 
 # Libraries
-LIBS = $(PROJECT_HOME)/protobuf/lib/libprotobuf.a
-#LIBS = $(PROJECT_HOME)/protobuf/lib/libprotobuf.so
+LIBS = -L$(PROJECT_HOME)/protobuf/lib -lprotobuf
 
-# gRpc files to generate from *.proto files 
+# Protobuf files to generate from *.proto files 
 PROTO_NAMES = $(basename $(notdir $(PROTO_SRCS)))
 
 PROTOC_CC   = $(addprefix $(PROTO_OUT)/, $(addsuffix .pb.cc, $(PROTO_NAMES)))
