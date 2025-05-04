@@ -9,7 +9,7 @@ LD = $(CC)
 
 # Configure Debug or Release build
 CFLAGS = -std=gnu++17 -Wall -pthread
-LDFLAGS = -pthread -Wl,-rpath,'$$ORIGIN/protobuf/lib'
+LDFLAGS = -pthread -Wl,-rpath,'$$ORIGIN/$(PROTOBUF_INSTALL)/lib'
 
 ifeq "$(DEBUG)" "true"
   # Debug build
@@ -29,18 +29,19 @@ SRCS_SRV = $(PROJECT_HOME)/server.cpp
 SRCS_CLN = $(PROJECT_HOME)/client.cpp
 
 # Protobuf files 
-PROTOC = $(PROJECT_HOME)/protobuf/bin/protoc
+PROTOBUF_INSTALL = $(PROJECT_HOME)/protobuf.3.15.8
+PROTOC = $(PROTOBUF_INSTALL)/bin/protoc
 PROTO_OUT  = $(OBJ_DIR)/_generate
 PROTO_HOME = $(PROJECT_HOME)/protos
 PROTO_SRCS = $(PROTO_HOME)/hello.proto
 
 # Include directories
 INCS = -I$(PROJECT_HOME) \
-       -I$(PROJECT_HOME)/protobuf/inc \
+       -I$(PROTOBUF_INSTALL)/include \
        -I$(PROTO_OUT)
 
 # Libraries
-LIBS = -L$(PROJECT_HOME)/protobuf/lib -lprotobuf
+LIBS = -L$(PROTOBUF_INSTALL)/lib -lprotobuf
 
 # Protobuf files to generate from *.proto files 
 PROTO_NAMES = $(basename $(notdir $(PROTO_SRCS)))
