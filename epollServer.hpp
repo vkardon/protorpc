@@ -22,7 +22,6 @@
 #include <arpa/inet.h>
 #include "socketCommon.hpp"
 #include "threadPool.hpp"
-//#include "logger.hpp"
 
 const int DEFAULT_MAX_CONNECTIONS = 4096;
 const int DEFAULT_MAX_EVENTS = 64;

@@ -14,21 +14,20 @@
 #include <string>
 #include <sstream>
 #include <chrono>
-//#include "logger.hpp"
 
 // victor test - for debugging
-#include <iomanip>
-inline std::string ToHex(const void* str, int len)
-{
-    const char* buf = static_cast<const char*>(str);
-    std::stringstream hex_stream;
-    hex_stream << std::hex << std::setfill('0');
-    for(int i = 0; i < len; i++)
-      hex_stream << std::setw(2) << static_cast<int>(buf[i]);
-    return hex_stream.str();
-}
-inline std::string ToHex(const std::string& str) { return ToHex(str.data(), str.size()); }
-
+//#include <iomanip>
+//inline std::string ToHex(const void* str, int len)
+//{
+//    const char* buf = static_cast<const char*>(str);
+//    std::stringstream hex_stream;
+//    hex_stream << std::hex << std::setfill('0');
+//    for(int i = 0; i < len; i++)
+//      hex_stream << std::setw(2) << static_cast<int>(buf[i]);
+//    return hex_stream.str();
+//}
+//inline std::string ToHex(const std::string& str) { return ToHex(str.data(), str.size()); }
+//
 //class StopWatch
 //{
 //    std::chrono::time_point<std::chrono::high_resolution_clock> start;

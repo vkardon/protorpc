@@ -11,7 +11,6 @@
 #include <vector>
 #include <google/protobuf/message.h>
 #include "protoCommon.hpp"
-//#include "logger.hpp"
 
 namespace gen {
 
