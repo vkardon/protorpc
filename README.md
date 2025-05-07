@@ -1,2 +1,3 @@
-# protosrv
-TODO
+A header-only library providing a lightweight alternative to gRPC. It features a customizable, epoll-based networking framework (using blocking sockets for simplicity) and utilizes Protobuf for efficient data serialization. It can also be adapted for other serializers.
+
+This project originated from the practical need to support process forking, a scenario where standard gRPC server implementations often encounter limitations due to gRPC's lack of explicit support for forking. While primarily designed for high-traffic inter-process communication (IPC) over Unix domain sockets, standard network sockets are also well-supported.
