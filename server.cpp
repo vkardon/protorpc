@@ -5,7 +5,6 @@
 #include "protoServer.hpp"
 #include "hello.pb.h"
 #include <signal.h>
-#include <future>
 
 // Handler for SIGHUP, SIGINT, SIGQUIT and SIGTERM
 volatile static sig_atomic_t gSignalNumber{0};
@@ -44,26 +43,6 @@ public:
     MyServer() = delete;
     virtual ~MyServer() = default;
 
-    bool Start(unsigned short port)
-    {
-        // Run EpollServer::Start in a different thread (async)
-        std::future<bool> future = std::async(std::launch::async,
-                static_cast<bool (gen::EpollServer::*)(short unsigned int)>(&gen::EpollServer::Start),
-                this, port);
-
-        return StartImpl(std::move(future));   // Pass 'future' by value (move ownership)
-    }
-
-    bool Start(const char* sockName, bool isAbstract)
-    {
-        // Run EpollServer::Start in a different thread (async)
-        std::future<bool> future = std::async(std::launch::async,
-                static_cast<bool (gen::EpollServer::*)(const char*, bool)>(&gen::EpollServer::Start),
-                this, sockName, isAbstract);
-
-        return StartImpl(std::move(future));   // Pass 'future' by value (move ownership)
-    }
-
 private:
     virtual bool OnInit() override
     {
@@ -71,39 +50,25 @@ private:
         return true;
     }
 
+    virtual bool OnIdle() const override
+    {
+        if(gSignalNumber != 0)
+        {
+            // We got a signal. Exiting...
+            std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber << ", exiting..." << std::endl;
+            return false;   // Stop the server
+        }
+        return true;    // Keep running
+    }
+
     virtual void OnError(const char* fname, int lineNum, const std::string& err) const override
     {
         std::cerr << fname << ":" << lineNum << " " << err << std::endl;
-//        ERRORMSG(fname << ":" << lineNum << " " << err);
     }
 
     virtual void OnInfo(const char* fname, int lineNum, const std::string& info) const override
     {
         std::cout << fname << ":" << lineNum << " " << info << std::endl;
-//        OUTMSG(fname << ":" << lineNum << " " << info);
-    }
-
-    bool StartImpl(std::future<bool> future)
-    {
-        while(true)
-        {
-            if(gSignalNumber != 0)
-            {
-                // We got a signal. Exiting...
-                std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber << ", exiting..." << std::endl;
-                Stop();
-                break;
-            }
-            else
-            {
-                // Check if gen::ProtoServer::Start() is still running
-                auto status = future.wait_for(std::chrono::seconds(1));
-                if(status == std::future_status::ready)
-                    break; // gen::ProtoServer::Start() no longer running or failed to start
-            }
-        }
-
-        return future.get();
     }
 
     void OnPing(const Context& ctx,

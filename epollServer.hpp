@@ -69,6 +69,7 @@ protected:
 
     // For derived class to override
     virtual bool OnInit() { return true; }
+    virtual bool OnIdle() const { return true; }
     virtual bool OnRead(std::shared_ptr<ClientContext>& client) = 0;
     virtual bool OnWrite(std::shared_ptr<ClientContext>& client) = 0;
     virtual std::shared_ptr<ClientContext> MakeClientContext() = 0;
@@ -230,6 +231,10 @@ inline bool EpollServer::StartImpl()
         }
         else if(numEvents == 0) // Timeout occurred
         {
+            // Give derived client a chance to do something
+            if(!OnIdle())
+                break;
+
             // Periodically check for idle connections
             auto now = std::chrono::steady_clock::now();
             if(now - lastIdleCheck > idleCheckInterval)
