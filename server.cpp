@@ -50,17 +50,6 @@ private:
         return true;
     }
 
-    virtual bool OnIdle() const override
-    {
-        if(gSignalNumber != 0)
-        {
-            // We got a signal. Exiting...
-            std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber << ", exiting..." << std::endl;
-            return false;   // Stop the server
-        }
-        return true;    // Keep running
-    }
-
     virtual void OnError(const char* fname, int lineNum, const std::string& err) const override
     {
         std::cerr << fname << ":" << lineNum << " " << err << std::endl;
@@ -99,9 +88,23 @@ int main()
     Signal(SIGQUIT, HandlerExitSignal);
     Signal(SIGTERM, HandlerExitSignal);
 
-//    MyServer server(std::thread::hardware_concurrency());
-    MyServer server(8);
+    // Create MyServer
+    unsigned int mThreadsCount = std::thread::hardware_concurrency();
+    MyServer server(mThreadsCount);
 //    server.SetVerbose(true);
+
+    // Start a helper thread to observer exit signal
+    std::thread exitSignalObserver([&server]() 
+    {
+        while(gSignalNumber == 0)
+            usleep(500000);
+
+        // We got a signal. Stop the server.
+        std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber << ", exiting..." << std::endl;
+        server.Stop();
+    });
+
+    // Start MyServer
 //    if(!server.Start(8080))
     if(!server.Start("protoserver_domain_socket.sock", true))
     {
@@ -109,6 +112,8 @@ int main()
         return 1;
     }
 
+    // Join the helper thread and exit
+    exitSignalObserver.join();
     return 0;
 }
 

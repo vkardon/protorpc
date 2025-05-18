@@ -43,12 +43,12 @@ namespace gen {
 class EpollServer
 {
 public:
-    EpollServer(size_t threadsCount) : mThreadsCount(threadsCount) {}
+    EpollServer(unsigned int threadsCount) : mThreadsCount(threadsCount) {}
     virtual ~EpollServer() { Stop(); }
 
     bool Start(unsigned short port);
     bool Start(const char* sockName, bool isAbstract);
-    void Stop();
+    void Stop() { mServerRunning = false; }
 
     // Configuration
     void SetMaxEpollEventsCount(int maxEvents) { mMaxEvents = maxEvents; }
@@ -69,7 +69,6 @@ protected:
 
     // For derived class to override
     virtual bool OnInit() { return true; }
-    virtual bool OnIdle() const { return true; }
     virtual bool OnRead(std::shared_ptr<ClientContext>& client) = 0;
     virtual bool OnWrite(std::shared_ptr<ClientContext>& client) = 0;
     virtual std::shared_ptr<ClientContext> MakeClientContext() = 0;
@@ -85,6 +84,7 @@ private:
     void HandleReadEvent(int clientFd);
     void HandleWriteEvent(int clientFd);
     void CleanupClient(int clientFd);
+    void Cleanup();
 
     void AddClientContext(int clientFd, const struct sockaddr_in& clientAddr);
     std::shared_ptr<ClientContext> GetClientContext(int clientFd);
@@ -98,7 +98,7 @@ private:
     EpollServer(const EpollServer&) = delete;
 
 private:
-    size_t mThreadsCount{0};
+    unsigned int mThreadsCount{0};
     int mMaxEvents{DEFAULT_MAX_EVENTS};
     std::chrono::seconds mIdleTimeout{DEFAULT_IDLE_TIMEOUT};
     size_t mMaxConnections{DEFAULT_MAX_CONNECTIONS};
@@ -176,7 +176,7 @@ inline bool EpollServer::StartImpl()
     if(mEpollFd == -1)
     {
         OnError(__FNAME__, __LINE__, "epoll_create1() failed: " + std::string(strerror(errno)));
-        Stop();
+        Cleanup();
         return false;
     }
 
@@ -184,7 +184,7 @@ inline bool EpollServer::StartImpl()
     if(!EpollAdd(mListenFd, EPOLLIN))
     {
         OnError(__FNAME__, __LINE__, "Error adding listening fd " + std::to_string(mListenFd) + " to epoll.");
-        Stop();
+        Cleanup();
         return false;
     }
 
@@ -231,10 +231,6 @@ inline bool EpollServer::StartImpl()
         }
         else if(numEvents == 0) // Timeout occurred
         {
-            // Give derived client a chance to do something
-            if(!OnIdle())
-                break;
-
             // Periodically check for idle connections
             auto now = std::chrono::steady_clock::now();
             if(now - lastIdleCheck > idleCheckInterval)
@@ -250,40 +246,31 @@ inline bool EpollServer::StartImpl()
     }
 
     OnInfo(__FNAME__, __LINE__, "Main event loop finished.");
-    Stop();
+    Cleanup();
+    OnInfo(__FNAME__, __LINE__, "Epoll server stopped.");
     return true;
 }
 
-
-inline void EpollServer::Stop()
+inline void EpollServer::Cleanup()
 {
-    if(mServerRunning)
+    mThreadPool.Stop();
+
+    // Note: We don't need to lock mClientContextsMutex since threads are gone
+    for(const auto& pair : mClientContexts)
+        close(pair.first); // pair.first is the key (fd)
+
+    mClientContexts.clear();
+
+    if(mEpollFd != -1)
     {
-        mServerRunning = false;
+        close(mEpollFd);
+        mEpollFd = -1;
+    }
 
-        mThreadPool.Stop();
-
-        {
-            std::lock_guard<std::mutex> lock(mClientContextsMutex);
-            for(const auto& pair : mClientContexts)
-                close(pair.first); // pair.first is the key (fd)
-
-            mClientContexts.clear();
-        }
-
-        if(mEpollFd != -1)
-        {
-            close(mEpollFd);
-            mEpollFd = -1;
-        }
-
-        if(mListenFd != -1)
-        {
-            close(mListenFd);
-            mListenFd = -1;
-        }
-
-        OnInfo(__FNAME__, __LINE__, "Epoll server stopped.");
+    if(mListenFd != -1)
+    {
+        close(mListenFd);
+        mListenFd = -1;
     }
 }
 
