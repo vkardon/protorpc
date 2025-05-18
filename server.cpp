@@ -9,15 +9,6 @@
 // Handler for SIGHUP, SIGINT, SIGQUIT and SIGTERM
 volatile static sig_atomic_t gSignalNumber{0};
 
-int Signal(int signum, void (*handler)(int))
-{
-    struct sigaction sa, old_sa;
-    sa.sa_handler = handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART; // want interrupted system calls to be restarted
-    return sigaction(signum, &sa, &old_sa);
-}
-
 extern "C"
 void HandlerExitSignal(int signalNumber)
 {
@@ -34,6 +25,15 @@ void HandlerExitSignal(int signalNumber)
     write(STDOUT_FILENO, msg, strlen(msg));
 
     gSignalNumber = signalNumber;
+}
+
+int Signal(int signum, void (*handler)(int))
+{
+    struct sigaction sa, old_sa;
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; // want interrupted system calls to be restarted
+    return sigaction(signum, &sa, &old_sa);
 }
 
 class MyServer : public gen::ProtoServer
@@ -64,13 +64,10 @@ private:
                 const test::PingRequest& req,
                 test::PingResponse& resp)
     {
-//        const std::string sessionId = ctx.GetMetadata("sessionId");
-//        const std::string requestId = ctx.GetMetadata("reportId");
-//
-//        std::cout << __func__
-//                  << ": sessionId='" << sessionId << "'"
-//                  << ", requestId='" << requestId << "'"
-//                  << ", req=" << req.from() << std::endl;
+    //    std::cout << __func__
+    //              << ": sessionId='" << ctx.GetMetadata("sessionId") << "'"
+    //              << ", requestId='" << ctx.GetMetadata("reportId") << "'"
+    //              << ", req=" << req.from() << std::endl;
 
         resp.set_msg("Pong");
     }
@@ -89,18 +86,19 @@ int main()
     Signal(SIGTERM, HandlerExitSignal);
 
     // Create MyServer
-    unsigned int mThreadsCount = std::thread::hardware_concurrency();
-    MyServer server(mThreadsCount);
+    unsigned int threadsCount = std::thread::hardware_concurrency();
+    MyServer server(threadsCount);
 //    server.SetVerbose(true);
 
     // Start a helper thread to observer exit signal
-    std::thread exitSignalObserver([&server]() 
+    std::thread signalObserverThread([&server]() 
     {
         while(gSignalNumber == 0)
             usleep(500000);
 
         // We got a signal. Stop the server.
-        std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber << ", exiting..." << std::endl;
+        std::cout << __FNAME__<< ":" << __LINE__ << " Got a signal " << gSignalNumber 
+                  << " (" << strsignal(gSignalNumber) << "), exiting..." << std::endl;
         server.Stop();
     });
 
@@ -113,7 +111,7 @@ int main()
     }
 
     // Join the helper thread and exit
-    exitSignalObserver.join();
+    signalObserverThread.join();
     return 0;
 }
 

@@ -29,17 +29,6 @@ const int DEFAULT_IDLE_TIMEOUT = 60;    // Sec
 
 namespace gen {
 
-#ifndef __FNAME__
-    // This constexpr method extracts the filename from a full path using
-    // the __FILE__ preprocessor variable, resolving at compile time.
-    constexpr const char* fname(const char* file, int i)
-    {
-        return (i == 0) ? (file) : (*(file + i) == '/' ? (file + i + 1) : fname(file, i - 1));
-    }
-    #define __FNAME__ gen::fname(__FILE__, sizeof(__FILE__)-1)
-#endif
-
-
 class EpollServer
 {
 public:
@@ -169,8 +158,6 @@ inline bool EpollServer::Start(const char* sockName, bool isAbstract)
 
 inline bool EpollServer::StartImpl()
 {
-    mServerRunning = true;
-
     // Create epoll instance
     mEpollFd = epoll_create1(0);
     if(mEpollFd == -1)
@@ -194,6 +181,7 @@ inline bool EpollServer::StartImpl()
     mThreadPool.Start(mThreadsCount);
 
     // Main event loop
+    mServerRunning = true;
     struct epoll_event events[mMaxEvents];
     int epollWaitTimeoutMs = 100;
 
@@ -253,7 +241,9 @@ inline bool EpollServer::StartImpl()
 
 inline void EpollServer::Cleanup()
 {
+    // Stop the thread pool and wait all threads to complete
     mThreadPool.Stop();
+    mThreadPool.Wait();
 
     // Note: We don't need to lock mClientContextsMutex since threads are gone
     for(const auto& pair : mClientContexts)
@@ -519,7 +509,7 @@ inline void EpollServer::OnError(const char* fname, int lineNum, const std::stri
 
 inline void EpollServer::OnInfo(const char* fname, int lineNum, const std::string& info) const
 {
-    std::cerr << "Info: " << fname << ":" << lineNum << " " << info << std::endl;
+    std::cout << "Info: " << fname << ":" << lineNum << " " << info << std::endl;
 }
 
 } // namespace gen
