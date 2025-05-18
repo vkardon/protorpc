@@ -33,7 +33,6 @@ int getCurrentOpenFdCount()
     return count;
 }
 
-
 void RunTest(int numThreads, int numOfCallsPerThread)
 {
     // Create and start multiple threads

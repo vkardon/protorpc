@@ -37,7 +37,7 @@ PROTO_HOME = $(PROJECT_HOME)/protos
 PROTO_SRCS = $(PROTO_HOME)/hello.proto
 
 # Include directories
-INCS = -I$(PROJECT_HOME) \
+INCS = -I$(PROJECT_HOME)/include \
        -I$(PROTOBUF_INSTALL)/include \
        -I$(PROTO_OUT)
 
