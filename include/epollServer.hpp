@@ -123,7 +123,7 @@ inline bool EpollServer::Start(unsigned short port)
 
     {
         std::stringstream ss;
-        ss << "Starting Epoll Server on port " << port << ".";
+        ss << "Starting server on port " << port << ".";
         OnInfo(__FNAME__, __LINE__, ss.str());
     }
 
@@ -149,7 +149,7 @@ inline bool EpollServer::Start(const char* sockName, bool isAbstract)
 
     {
         std::stringstream ss;
-        ss << "Starting Epoll Server on domain socket" << (isAbstract ? " in abstract namespace " : " ") << "'" << sockName << "'.";
+        ss << "Starting server on domain socket" << (isAbstract ? " in abstract namespace " : " ") << "'" << sockName << "'.";
         OnInfo(__FNAME__, __LINE__, ss.str());
     }
 
