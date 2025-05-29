@@ -64,7 +64,8 @@ namespace gen {
     #define __FNAME__ gen::fname(__FILE__, sizeof(__FILE__)-1)
 #endif
 
-inline int SetupServerSocket(unsigned short port, bool nonblocking, std::string& errMsg)
+inline int SetupServerSocket(unsigned short port, bool nonblocking, 
+                             int backlog, std::string& errMsg)
 {
     // Create socket
     int sock = socket(AF_INET, (nonblocking ? SOCK_STREAM | SOCK_NONBLOCK : SOCK_STREAM), 0);
@@ -96,7 +97,7 @@ inline int SetupServerSocket(unsigned short port, bool nonblocking, std::string&
     }
 
     // Listen for connections
-    if(listen(sock, 5) == -1)
+    if(listen(sock, backlog) == -1)
     {
         close(sock);
         errMsg = "listen() failed: " + std::string(strerror(errno));
@@ -106,7 +107,8 @@ inline int SetupServerSocket(unsigned short port, bool nonblocking, std::string&
     return sock;
 }
 
-inline int SetupServerDomainSocket(const char* sockName, bool isAbstract, bool nonblocking, std::string& errMsg)
+inline int SetupServerDomainSocket(const char* sockName, bool isAbstract, 
+                                   int backlog, bool nonblocking, std::string& errMsg)
 {
     if(!sockName || *sockName == '\0')
     {
@@ -153,7 +155,7 @@ inline int SetupServerDomainSocket(const char* sockName, bool isAbstract, bool n
     }
 
     // Listen for connections
-    if(listen(sock, 5) == -1)
+    if(listen(sock, backlog) == -1)
     {
         close(sock);
         errMsg = "listen() failed: " + std::string(strerror(errno));

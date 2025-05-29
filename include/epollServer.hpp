@@ -23,6 +23,7 @@
 #include "socketCommon.hpp"
 #include "threadPool.hpp"
 
+const int DEFAULT_BACKLOG = 512;
 const int DEFAULT_MAX_CONNECTIONS = 4096;
 const int DEFAULT_MAX_EVENTS = 64;
 const int DEFAULT_IDLE_TIMEOUT = 60;    // Sec
@@ -35,8 +36,8 @@ public:
     EpollServer(unsigned int threadsCount) : mThreadsCount(threadsCount) {}
     virtual ~EpollServer() { Stop(); }
 
-    bool Start(unsigned short port);
-    bool Start(const char* sockName, bool isAbstract);
+    bool Start(unsigned short port, int backlog = DEFAULT_BACKLOG);
+    bool Start(const char* sockName, bool isAbstract, int backlog = DEFAULT_BACKLOG);
     void Stop() { mServerRunning = false; }
 
     // Configuration
@@ -104,7 +105,7 @@ protected:
 
 };
 
-inline bool EpollServer::Start(unsigned short port)
+inline bool EpollServer::Start(unsigned short port, int backlog)
 {
     if(!OnInit())
     {
@@ -114,7 +115,7 @@ inline bool EpollServer::Start(unsigned short port)
 
     // Create listening NET socket (nonblocking)
     std::string errMsg;
-    mListenFd = gen::SetupServerSocket(port, false /*blocking*/, errMsg);
+    mListenFd = gen::SetupServerSocket(port, false /*blocking*/, backlog, errMsg);
     if(mListenFd < 0)
     {
         OnError(__FNAME__, __LINE__, errMsg);
@@ -130,7 +131,7 @@ inline bool EpollServer::Start(unsigned short port)
     return StartImpl();
 }
 
-inline bool EpollServer::Start(const char* sockName, bool isAbstract)
+inline bool EpollServer::Start(const char* sockName, bool isAbstract, int backlog)
 {
     if(!OnInit())
     {
@@ -140,7 +141,7 @@ inline bool EpollServer::Start(const char* sockName, bool isAbstract)
 
     // Create listening unix domain socket (nonblocking)
     std::string errMsg;
-    mListenFd = gen::SetupServerDomainSocket(sockName, isAbstract, false /*blocking*/, errMsg);
+    mListenFd = gen::SetupServerDomainSocket(sockName, isAbstract, false /*blocking*/, backlog, errMsg);
     if(mListenFd < 0)
     {
         OnError(__FNAME__, __LINE__, errMsg);
