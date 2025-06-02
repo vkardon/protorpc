@@ -6,7 +6,6 @@
 
 #include <unistd.h>
 #include <sys/socket.h>
-#include <sys/select.h>     // select()
 #include <poll.h>           // poll()
 #include <arpa/inet.h>      // htonl()/ntohl()
 #include <sys/un.h>
