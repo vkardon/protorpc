@@ -40,17 +40,19 @@ namespace gen {
     // hexadecimal string. It writes hex characters directly into a pre-allocated
     // char array.
     // NOTE: The 'dest' buffer must be at least (len * 2) in size.
-    inline void ToHex(char* dest, const void* str, int len) 
+    inline size_t ToHex(char* dest, const void* str, size_t len)
     {
         static const char* lut = "0123456789abcdef"; // Lookup table for hex digits
 
         // Tight loop using bit-shifting (fastest way to split a byte)
         const uint8_t* data = static_cast<const uint8_t*>(str);
-        for(int i = 0; i < len; ++i) 
+        for(size_t i = 0; i < len; ++i)
         {
             *dest++ = lut[data[i] >> 4];   // High nibble
             *dest++ = lut[data[i] & 0x0f]; // Low nibble
         }
+
+        return len * 2;
     }
 
     // "Hex Dump" function: Convert raw binary data into a human-readable
