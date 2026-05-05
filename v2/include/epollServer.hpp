@@ -61,6 +61,7 @@ protected:
         std::atomic<bool> wantsWrite{false};
         std::vector<uint8_t> inboundBuffer;
         std::vector<uint8_t> outboundBuffer;
+        size_t outboundOffset{0}; // Track how much has been sent
     };
 
     virtual bool OnInit() { return true; }
@@ -498,17 +499,16 @@ inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::
 inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& client)
 {
     // As long as there is data in the vector, keep trying to send
-    while(!client->outboundBuffer.empty())
+    while(client->outboundOffset < client->outboundBuffer.size())
     {
-        ssize_t n = send(client->fd, client->outboundBuffer.data(),
-                         client->outboundBuffer.size(), MSG_NOSIGNAL);
+        size_t remaining = client->outboundBuffer.size() - client->outboundOffset;
+        ssize_t n = send(client->fd,
+                         client->outboundBuffer.data() + client->outboundOffset,
+                         remaining, MSG_NOSIGNAL);
 
         if(n > 0)
         {
-            // Remove exactly what was sent from the front.
-            // This keeps the remaining data contiguous at the start of the vector.
-            client->outboundBuffer.erase(client->outboundBuffer.begin(),
-                                         client->outboundBuffer.begin() + n);
+            client->outboundOffset += n;
         }
         else
         {
@@ -519,7 +519,9 @@ inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& cli
         }
     }
 
-    // If we get here, the vector is empty
+    // Fully drained: Reset the vector and offset to reuse memory capacity
+    client->outboundBuffer.clear();
+    client->outboundOffset = 0;
     client->wantsWrite = false;
     return true;
 }
