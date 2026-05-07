@@ -27,7 +27,7 @@ constexpr int DEFAULT_BACKLOG = 1024;
 constexpr int DEFAULT_MAX_EVENTS = 1024;
 constexpr unsigned long MAX_CONNECTION_IDLE_TIME = 60;
 constexpr size_t DEFAULT_INBOUND_BUFFER_SIZE = 4 * 1024;            // 4 KB
-constexpr size_t DEFAULT_OUTBOUND_BUFFER_SIZE = 1 * 1024 * 1024;    // 1MB
+constexpr size_t DEFAULT_OUTBOUND_BUFFER_SIZE = 16 * 1024 * 1024;   // 16 KB
 
 namespace gen {
 
@@ -44,32 +44,26 @@ public:
     void Stop();
 
     void SetVerbose(bool verbose) { mVerbose = verbose; }
+    void SetInboundBufferSize(size_t size) { mInboundBufferSize = size; }
+    void SetOutboundBufferSize(size_t size) { mOutboundBufferSize = size; }
 
 protected:
     struct ClientContext
     {
-        ClientContext() = default;
+        ClientContext(EpollServer& srvIn)
+            : srv(srvIn),
+              inboundBuffer(srvIn.mInboundBufferSize),
+              outboundBuffer(srvIn.mOutboundBufferSize) {}
         virtual ~ClientContext() = default;
 
-        // Methods to handle received data
-        template <typename F>
-        bool ConsumeReceived(size_t len, F&& processor);
-        size_t GetReceivedSize() const { return inboundBuffer.Size(); }
-        uint8_t GetReceivedByte(size_t index) const { return inboundBuffer[index]; }
+        RingBuffer& GetInboundBuffer() { return inboundBuffer ; }
 
-        bool Send(const void* data, size_t len);
+        template<typename F>
+        bool ConsumeReceived(size_t len, F&& processor) { return srv.ConsumeReceived(this, len, processor); }
+        bool Send(const void* data, size_t len) { return srv.Send(this, data, len); }
 
-    private:
-        enum class RecvStatus
-        {
-            UNKNOWN = 0,
-            OK,
-            DISCONNECT,
-            ERROR
-        };
-
-        RecvStatus Receive(std::string& errMsg);
-
+    private: 
+        EpollServer& srv;
         int fd{-1};
         std::chrono::time_point<std::chrono::steady_clock> lastActivityTime;
         uint64_t connectionId{0};
@@ -97,6 +91,20 @@ private:
     bool FlushOutboundBuffer(std::shared_ptr<ClientContext>& client);
     int GetMaxFiles();
 
+    template<typename F>
+    bool ConsumeReceived(ClientContext* client, size_t len, F&& processor);
+    bool Send(ClientContext* client, const void* data, size_t len);
+
+    enum class RecvStatus
+    {
+        UNKNOWN = 0,
+        OK,
+        DISCONNECT,
+        ERROR
+    };
+
+    RecvStatus Receive(std::shared_ptr<gen::EpollServer::ClientContext>& client);
+
 private:
     unsigned int mThreadsCount{0};
     std::atomic<bool> mServerRunning{false};
@@ -111,518 +119,526 @@ private:
 
 protected:
     bool mVerbose{false};
+    size_t mInboundBufferSize{DEFAULT_INBOUND_BUFFER_SIZE};
+    size_t mOutboundBufferSize{DEFAULT_OUTBOUND_BUFFER_SIZE};
 };
 
-    inline int EpollServer::GetMaxFiles()
+inline int EpollServer::GetMaxFiles()
+{
+    struct rlimit rl;
+    if(getrlimit(RLIMIT_NOFILE, &rl) == 0)
+        return static_cast<int>(rl.rlim_cur);
+    return 65535;
+}
+
+inline void EpollServer::OnError(const char* fname, int lineNum, const std::string& err) const
+{
+    std::cerr << "Error: " << fname << ":" << lineNum << " " << err << std::endl;
+}
+
+inline void EpollServer::OnInfo(const char* fname, int lineNum, const std::string& info) const
+{
+    std::cout << "Info: " << fname << ":" << lineNum << " " << info << std::endl;
+}
+
+inline bool EpollServer::Start(unsigned short port, int backlog)
+{
+    if(!OnInit())
     {
-        struct rlimit rl;
-        if(getrlimit(RLIMIT_NOFILE, &rl) == 0)
-            return static_cast<int>(rl.rlim_cur);
-        return 65535;
+        OnError(__FNAME__, __LINE__, "Initialization failed: OnInit() returned false");
+        return false;
     }
 
-    inline void EpollServer::OnError(const char* fname, int lineNum, const std::string& err) const
+    mPort = port;
+    mBacklog = backlog;
+    mServerRunning = true;
+
+    std::stringstream ss;
+    ss << "Starting Server on port " << port << " with " << mThreadsCount << " threads...";
+    OnInfo(__FNAME__, __LINE__, ss.str());
+
+    for(unsigned int i = 0; i < mThreadsCount; ++i)
+        mThreads.emplace_back([this]() { ReactorLoop(); });
+
+    return true;
+}
+
+inline bool EpollServer::Start(const char* unixPath, int backlog)
+{
+    if(!OnInit())
     {
-        std::cerr << "Error: " << fname << ":" << lineNum << " " << err << std::endl;
+        OnError(__FNAME__, __LINE__, "Initialization failed: OnInit() returned false");
+        return false;
     }
 
-    inline void EpollServer::OnInfo(const char* fname, int lineNum, const std::string& info) const
+    std::string errMsg;
+    mUnixDomainSocket = SetupUnixSocket(unixPath, backlog, errMsg);
+    if(mUnixDomainSocket < 0)
     {
-        std::cout << "Info: " << fname << ":" << lineNum << " " << info << std::endl;
+        OnError(__FNAME__, __LINE__, errMsg);
+        return false;
+    }
+    mBacklog = backlog;
+    mServerRunning = true;
+
+    std::stringstream ss;
+    ss << "Starting Server on Unix Domain Socket '" << mActiveUnixPath << "' with " << mThreadsCount << " threads...";
+    OnInfo(__FNAME__, __LINE__, ss.str());
+
+    for(unsigned int i = 0; i < mThreadsCount; ++i)
+        mThreads.emplace_back([this]() { ReactorLoop(); });
+
+    return true;
+}
+
+inline void EpollServer::Stop()
+{
+    mServerRunning = false;
+
+    for(auto& t : mThreads)
+    {
+        if(t.joinable())
+            t.join();
+    }
+    mThreads.clear();
+
+    if(IsUnixSocket())
+    {
+        if(mUnixDomainSocket >= 0)
+            close(mUnixDomainSocket);
+        mUnixDomainSocket = -1;
+
+        if(!mActiveUnixPath.empty())
+            unlink(mActiveUnixPath.c_str());
+        mActiveUnixPath.clear();
+    }
+}
+
+inline void EpollServer::ReactorLoop()
+{
+    int threadEpollFd = epoll_create1(EPOLL_CLOEXEC);
+    if(threadEpollFd == -1)
+    {
+        OnError(__FNAME__, __LINE__, "epoll_create1() failed: " + std::string(strerror(errno)));
+        return;
     }
 
-    inline bool EpollServer::Start(unsigned short port, int backlog)
+    std::unordered_map<int, std::shared_ptr<ClientContext>> localClients;
+    localClients.reserve(1024); // Start with a reasonable baseline
+
+    int listenFd = (IsUnixSocket() ? mUnixDomainSocket : -1);
+    if(listenFd == -1)
     {
-        if(!OnInit())
-        {
-            OnError(__FNAME__, __LINE__, "Initialization failed: OnInit() returned false");
-            return false;
-        }
-
-        mPort = port;
-        mBacklog = backlog;
-        mServerRunning = true;
-
-        std::stringstream ss;
-        ss << "Starting Server on port " << port << " with " << mThreadsCount << " threads...";
-        OnInfo(__FNAME__, __LINE__, ss.str());
-
-        for(unsigned int i = 0; i < mThreadsCount; ++i)
-            mThreads.emplace_back([this]() { ReactorLoop(); });
-
-        return true;
-    }
-
-    inline bool EpollServer::Start(const char* unixPath, int backlog)
-    {
-        if(!OnInit())
-        {
-            OnError(__FNAME__, __LINE__, "Initialization failed: OnInit() returned false");
-            return false;
-        }
-
         std::string errMsg;
-        mUnixDomainSocket = SetupUnixSocket(unixPath, backlog, errMsg);
-        if(mUnixDomainSocket < 0)
+        listenFd = SetupTcpSocket(mPort, mBacklog, errMsg);
+        if(listenFd < 0)
         {
             OnError(__FNAME__, __LINE__, errMsg);
-            return false;
-        }
-        mBacklog = backlog;
-        mServerRunning = true;
-
-        std::stringstream ss;
-        ss << "Starting Server on Unix Domain Socket '" << mActiveUnixPath << "' with " << mThreadsCount << " threads...";
-        OnInfo(__FNAME__, __LINE__, ss.str());
-
-        for(unsigned int i = 0; i < mThreadsCount; ++i)
-            mThreads.emplace_back([this]() { ReactorLoop(); });
-
-        return true;
-    }
-
-    inline void EpollServer::Stop()
-    {
-        mServerRunning = false;
-
-        for(auto& t : mThreads)
-        {
-            if(t.joinable())
-                t.join();
-        }
-        mThreads.clear();
-
-        if(IsUnixSocket())
-        {
-            if(mUnixDomainSocket >= 0)
-                close(mUnixDomainSocket);
-            mUnixDomainSocket = -1;
-
-            if(!mActiveUnixPath.empty())
-                unlink(mActiveUnixPath.c_str());
-            mActiveUnixPath.clear();
-        }
-    }
-
-    inline void EpollServer::ReactorLoop()
-    {
-        int threadEpollFd = epoll_create1(EPOLL_CLOEXEC);
-        if(threadEpollFd == -1)
-        {
-            OnError(__FNAME__, __LINE__, "epoll_create1() failed: " + std::string(strerror(errno)));
-            return;
-        }
-
-        std::unordered_map<int, std::shared_ptr<ClientContext>> localClients;
-        localClients.reserve(1024); // Start with a reasonable baseline
-
-        int listenFd = (IsUnixSocket() ? mUnixDomainSocket : -1);
-        if(listenFd == -1)
-        {
-            std::string errMsg;
-            listenFd = SetupTcpSocket(mPort, mBacklog, errMsg);
-            if(listenFd < 0)
-            {
-                OnError(__FNAME__, __LINE__, errMsg);
-                close(threadEpollFd);
-                return;
-            }
-        }
-
-        struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLET;
-        ev.data.u32 = static_cast<uint32_t>(listenFd);
-
-        if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, listenFd, &ev) == -1)
-        {
-            OnError(__FNAME__, __LINE__, "epoll_ctl(listenFd) failed: " + std::string(strerror(errno)));
-            if(IsTcpSocket())
-                close(listenFd);
             close(threadEpollFd);
             return;
         }
+    }
 
-        // Epool event processing loop
-        struct epoll_event evs[DEFAULT_MAX_EVENTS];
-        auto lastCleanupTime = std::chrono::steady_clock::now();
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.u32 = static_cast<uint32_t>(listenFd);
 
-        while(mServerRunning)
+    if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, listenFd, &ev) == -1)
+    {
+        OnError(__FNAME__, __LINE__, "epoll_ctl(listenFd) failed: " + std::string(strerror(errno)));
+        if(IsTcpSocket())
+            close(listenFd);
+        close(threadEpollFd);
+        return;
+    }
+
+    // Epool event processing loop
+    struct epoll_event evs[DEFAULT_MAX_EVENTS];
+    auto lastCleanupTime = std::chrono::steady_clock::now();
+
+    while(mServerRunning)
+    {
+        int numEvents = epoll_wait(threadEpollFd, evs, DEFAULT_MAX_EVENTS, 100);
+        if(numEvents < 0)
         {
-            int numEvents = epoll_wait(threadEpollFd, evs, DEFAULT_MAX_EVENTS, 100);
-            if(numEvents < 0)
-            {
-                if(errno == EINTR)
-                    continue;
-                break;
-            }
+            if(errno == EINTR)
+                continue;
+            break;
+        }
 
-            for(int i = 0; i < numEvents; ++i)
-            {
-                uint32_t events = evs[i].events;
-                int eventFd = static_cast<int>(evs[i].data.u32);
+        for(int i = 0; i < numEvents; ++i)
+        {
+            uint32_t events = evs[i].events;
+            int eventFd = static_cast<int>(evs[i].data.u32);
 
-                if(eventFd == listenFd)
+            if(eventFd == listenFd)
+            {
+                while(mServerRunning)
                 {
-                    while(mServerRunning)
+                    // Use accept4 to set non-blocking and cloexec immediately
+                    int clientFd = accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+                    if(clientFd == -1)
                     {
-                        // Use accept4 to set non-blocking and cloexec immediately
-                        int clientFd = accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-
-                        if(clientFd == -1)
+                        if(errno == EAGAIN || errno == EWOULDBLOCK)
                         {
-                            if(errno == EAGAIN || errno == EWOULDBLOCK)
-                            {
-                                break; // Queue is empty, we are done for this wakeup
-                            }
-                            else if(errno == EINTR)
-                            {
-                                continue; // Interrupted by signal, try again
-                            }
-                            else
-                            {
-                                OnError(__FNAME__, __LINE__, "accept4() failed: " + std::string(strerror(errno)));
-                                break;
-                            }
+                            break; // Queue is empty, we are done for this wakeup
                         }
-
-                        // Safety check for vector bounds
-                        if(clientFd >= mMaxFds)
+                        else if(errno == EINTR)
                         {
-                            OnError(__FNAME__, __LINE__, "Max FDs reached, closing connection");
-                            close(clientFd);
-                            continue;
+                            continue; // Interrupted by signal, try again
                         }
-
-                        // Register the new client with ONESHOT and ET (Edge Triggering)
-                        struct epoll_event cev;
-                        cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-                        cev.data.u32 = static_cast<uint32_t>(clientFd);
-
-                        if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, clientFd, &cev) == -1)
+                        else
                         {
-                            OnError(__FNAME__, __LINE__, "epoll_ctl(clientFd) failed: " + std::string(strerror(errno)));
-                            close(clientFd);
-                            continue;
+                            OnError(__FNAME__, __LINE__, "accept4() failed: " + std::string(strerror(errno)));
+                            break;
                         }
-
-                        // Initialize context
-                        auto ctx = MakeClientContext();
-                        ctx->fd = clientFd;
-                        ctx->connectionId = mNextConnectionId.fetch_add(1, std::memory_order_relaxed);
-                        ctx->lastActivityTime = std::chrono::steady_clock::now();
-                        localClients[clientFd] = ctx;
-
-                        if(mVerbose)
-                            OnInfo(__FNAME__, __LINE__, "Accepted connection ID: " + std::to_string(ctx->connectionId));
                     }
+
+                    // Safety check for vector bounds
+                    if(clientFd >= mMaxFds)
+                    {
+                        OnError(__FNAME__, __LINE__, "Max FDs reached, closing connection");
+                        close(clientFd);
+                        continue;
+                    }
+
+                    // Register the new client with ONESHOT and ET (Edge Triggering)
+                    struct epoll_event cev;
+                    cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
+                    cev.data.u32 = static_cast<uint32_t>(clientFd);
+
+                    if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, clientFd, &cev) == -1)
+                    {
+                        OnError(__FNAME__, __LINE__, "epoll_ctl(clientFd) failed: " + std::string(strerror(errno)));
+                        close(clientFd);
+                        continue;
+                    }
+
+                    // Initialize context
+                    auto ctx = MakeClientContext();
+                    ctx->fd = clientFd;
+                    ctx->connectionId = mNextConnectionId.fetch_add(1, std::memory_order_relaxed);
+                    ctx->lastActivityTime = std::chrono::steady_clock::now();
+                    localClients[clientFd] = ctx;
+
+                    if(mVerbose)
+                        OnInfo(__FNAME__, __LINE__, "Accepted connection ID: " + std::to_string(ctx->connectionId));
+                }
+            }
+            else
+            {
+                int clientFd = eventFd;
+                auto it = localClients.find(clientFd);
+                if(it == localClients.end())
+                    continue;
+                auto& client = it->second;
+
+                bool keepAlive = true;
+                client->lastActivityTime = std::chrono::steady_clock::now();
+
+                // Outbound processing block (standard EPOLLOUT)
+                if(events & EPOLLOUT)
+                {
+                    keepAlive = FlushOutboundBuffer(client);
+                    if(keepAlive && !client->wantsWrite)
+                        keepAlive = OnDataSent(client);
+                }
+
+                // Inbound processing block
+                if(keepAlive && (events & EPOLLIN))
+                {
+                    std::string recvErr;
+                    auto status = Receive(client);
+
+                    // Always process data if we have it, regardless of status
+                    if(!client->inboundBuffer.Empty())
+                    {
+                        keepAlive = OnDataReceived(client);
+                    }
+
+                    // If Receive signaled a disconnect or termination state, mark for closure
+                    if(status == RecvStatus::DISCONNECT)
+                    {
+                        keepAlive = false;
+                    }
+                    else if(status == RecvStatus::ERROR)
+                    {
+                        OnError(__FNAME__, __LINE__, "Receive error: " + recvErr);
+                        keepAlive = false;
+                    }
+
+                    // Flush any responses before the loop potentially closes the FD
+                    if(client->wantsWrite)
+                    {
+                        if(!FlushOutboundBuffer(client))
+                            keepAlive = false;
+                    }
+                }
+
+                // Final cleanup for this iteration
+                if(!keepAlive || (events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)))
+                {
+                    epoll_ctl(threadEpollFd, EPOLL_CTL_DEL, clientFd, nullptr);
+                    close(clientFd);
+                    localClients.erase(clientFd);
                 }
                 else
                 {
-                    int clientFd = eventFd;
-                    auto it = localClients.find(clientFd);
-                    if(it == localClients.end())
-                        continue;
-                    auto& client = it->second;
+                    struct epoll_event cev;
+                    cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
+                    if(client->wantsWrite)
+                        cev.events |= EPOLLOUT;
+                    cev.data.u32 = static_cast<uint32_t>(clientFd);
 
-                    bool keepAlive = true;
-                    client->lastActivityTime = std::chrono::steady_clock::now();
-
-                    // Outbound processing block (standard EPOLLOUT)
-                    if(events & EPOLLOUT)
+                    if(epoll_ctl(threadEpollFd, EPOLL_CTL_MOD, clientFd, &cev) == -1)
                     {
-                        keepAlive = FlushOutboundBuffer(client);
-                        if(keepAlive && !client->wantsWrite)
-                            keepAlive = OnDataSent(client);
-                    }
-
-                    // Inbound processing block
-                    if(keepAlive && (events & EPOLLIN))
-                    {
-                        std::string recvErr;
-                        auto status = client->Receive(recvErr);
-
-                        // Always process data if we have it, regardless of status
-                        if(!client->inboundBuffer.Empty())
-                        {
-                            keepAlive = OnDataReceived(client);
-                        }
-
-                        // If Receive signaled a disconnect or termination state, mark for closure
-                        if(status == ClientContext::RecvStatus::DISCONNECT)
-                        {
-                            keepAlive = false;
-                        }
-                        else if(status == ClientContext::RecvStatus::ERROR)
-                        {
-                            OnError(__FNAME__, __LINE__, "Receive error: " + recvErr);
-                            keepAlive = false;
-                        }
-
-                        // Flush any responses before the loop potentially closes the FD
-                        if(client->wantsWrite)
-                        {
-                            if(!FlushOutboundBuffer(client))
-                                keepAlive = false;
-                        }
-                    }
-
-                    // Final cleanup for this iteration
-                    if(!keepAlive || (events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)))
-                    {
-                        epoll_ctl(threadEpollFd, EPOLL_CTL_DEL, clientFd, nullptr);
+                        OnError(__FNAME__, __LINE__, "epoll_ctl(clientFd) failed: " + std::string(strerror(errno)));
                         close(clientFd);
                         localClients.erase(clientFd);
                     }
-                    else
-                    {
-                        struct epoll_event cev;
-                        cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-                        if(client->wantsWrite)
-                            cev.events |= EPOLLOUT;
-                        cev.data.u32 = static_cast<uint32_t>(clientFd);
-
-                        if(epoll_ctl(threadEpollFd, EPOLL_CTL_MOD, clientFd, &cev) == -1)
-                        {
-                            OnError(__FNAME__, __LINE__, "epoll_ctl(clientFd) failed: " + std::string(strerror(errno)));
-                            close(clientFd);
-                            localClients.erase(clientFd);
-                        }
-                    }
                 }
             }
+        }
 
-            // Idle connections cleanup
-            auto now = std::chrono::steady_clock::now();
-            if(now - lastCleanupTime > std::chrono::seconds(5))
+        // Idle connections cleanup
+        auto now = std::chrono::steady_clock::now();
+        if(now - lastCleanupTime > std::chrono::seconds(5))
+        {
+            for(auto it = localClients.begin(); it != localClients.end();)
             {
-                for(auto it = localClients.begin(); it != localClients.end();)
+                auto& client = it->second;
+                if(now - client->lastActivityTime > std::chrono::seconds(MAX_CONNECTION_IDLE_TIME))
                 {
-                    auto& client = it->second;
-                    if(now - client->lastActivityTime > std::chrono::seconds(MAX_CONNECTION_IDLE_TIME))
-                    {
-                        if(mVerbose)
-                            OnInfo(__FNAME__, __LINE__, "Closing idle connection ID: " + std::to_string(client->connectionId));
+                    if(mVerbose)
+                        OnInfo(__FNAME__, __LINE__, "Closing idle connection ID: " + std::to_string(client->connectionId));
 
-                        // Cleanup: Close and remove from epoll
-                        epoll_ctl(threadEpollFd, EPOLL_CTL_DEL, it->first, nullptr);
-                        close(it->first);
+                    // Cleanup: Close and remove from epoll
+                    epoll_ctl(threadEpollFd, EPOLL_CTL_DEL, it->first, nullptr);
+                    close(it->first);
 
-                        it = localClients.erase(it); // go to the next element
-                    }
-                    else
-                    {
-                        ++it;
-                    }
+                    it = localClients.erase(it); // go to the next element
                 }
-                lastCleanupTime = now;
+                else
+                {
+                    ++it;
+                }
             }
+            lastCleanupTime = now;
         }
-
-        for(auto& [fd, client] : localClients)
-        {
-            close(fd);
-        }
-        localClients.clear();
-
-        if(IsTcpSocket() && listenFd >= 0)
-            close(listenFd);
-        close(threadEpollFd);
     }
 
-    inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg)
+    for(auto& [fd, client] : localClients)
     {
-        int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if(sock == -1)
-        {
-            errMsg = "socket() failed: " + std::string(strerror(errno));
-            return -1;
-        }
+        close(fd);
+    }
+    localClients.clear();
 
-        int opt = 1;
-        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    if(IsTcpSocket() && listenFd >= 0)
+        close(listenFd);
+    close(threadEpollFd);
+}
 
-        sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(port);
-
-        if(bind(sock, (sockaddr*)&addr, sizeof(addr)) == -1)
-        {
-            errMsg = "bind() failed: " + std::string(strerror(errno));
-            close(sock);
-            return -1;
-        }
-
-        if(listen(sock, backlog) == -1)
-        {
-            errMsg = "listen() failed: " + std::string(strerror(errno));
-            close(sock);
-            return -1;
-        }
-
-        return sock;
+inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg)
+{
+    int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if(sock == -1)
+    {
+        errMsg = "socket() failed: " + std::string(strerror(errno));
+        return -1;
     }
 
-    inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::string& errMsg)
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
+    sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if(bind(sock, (sockaddr*)&addr, sizeof(addr)) == -1)
     {
-        struct sockaddr_un addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-        socklen_t addrLen = 0;
-
-        if(unixPath[0] == '@' || unixPath[0] == '\0')
-        {
-            const char* name = unixPath + 1;
-            size_t nameLen = strlen(name);
-            addr.sun_path[0] = '\0';
-            std::memcpy(addr.sun_path + 1, name, nameLen);
-            addrLen = offsetof(struct sockaddr_un, sun_path) + 1 + nameLen;
-            mActiveUnixPath.assign(name, nameLen);
-        }
-        else
-        {
-            unlink(unixPath);
-            snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", unixPath);
-            addrLen = sizeof(struct sockaddr_un);
-            mActiveUnixPath = unixPath;
-        }
-
-        int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if(sock == -1)
-        {
-            errMsg = "socket(AF_UNIX) failed: " + std::string(strerror(errno));
-            return -1;
-        }
-
-        if(bind(sock, (struct sockaddr*)&addr, addrLen) == -1)
-        {
-            errMsg = "bind(UDS) failed: " + std::string(strerror(errno));
-            close(sock);
-            return -1;
-        }
-
-        if(listen(sock, backlog) == -1)
-        {
-            errMsg = "listen(UDS) failed: " + std::string(strerror(errno));
-            close(sock);
-            return -1;
-        }
-
-        return sock;
+        errMsg = "bind() failed: " + std::string(strerror(errno));
+        close(sock);
+        return -1;
     }
 
-    bool gen::EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& client)
+    if(listen(sock, backlog) == -1)
     {
-        auto rr = client->outboundBuffer.GetReadRegions(0, client->outboundBuffer.Size());
-        if(rr.count == 0)
+        errMsg = "listen() failed: " + std::string(strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::string& errMsg)
+{
+    struct sockaddr_un addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    socklen_t addrLen = 0;
+
+    if(unixPath[0] == '@' || unixPath[0] == '\0')
+    {
+        const char* name = unixPath + 1;
+        size_t nameLen = strlen(name);
+        addr.sun_path[0] = '\0';
+        std::memcpy(addr.sun_path + 1, name, nameLen);
+        addrLen = offsetof(struct sockaddr_un, sun_path) + 1 + nameLen;
+        mActiveUnixPath.assign(name, nameLen);
+    }
+    else
+    {
+        unlink(unixPath);
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", unixPath);
+        addrLen = sizeof(struct sockaddr_un);
+        mActiveUnixPath = unixPath;
+    }
+
+    int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if(sock == -1)
+    {
+        errMsg = "socket(AF_UNIX) failed: " + std::string(strerror(errno));
+        return -1;
+    }
+
+    if(bind(sock, (struct sockaddr*)&addr, addrLen) == -1)
+    {
+        errMsg = "bind(UDS) failed: " + std::string(strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    if(listen(sock, backlog) == -1)
+    {
+        errMsg = "listen(UDS) failed: " + std::string(strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+bool gen::EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& client)
+{
+    auto rr = client->outboundBuffer.GetReadRegions(0, client->outboundBuffer.Size());
+    if(rr.count == 0)
+        return true;
+
+    struct iovec iov[2];
+    for(int i = 0; i < rr.count; ++i)
+    {
+        iov[i].iov_base = rr.regions[i].ptr;
+        iov[i].iov_len = rr.regions[i].len;
+    }
+
+    struct msghdr msg = {};
+    msg.msg_iov = iov;
+    msg.msg_iovlen = rr.count;
+
+    // Send using MSG_NOSIGNAL to avoid crashing on broken pipes
+    ssize_t sent = sendmsg(client->fd, &msg, MSG_NOSIGNAL);
+
+    if(sent > 0)
+    {
+        // Update the RingBuffer's head
+        client->outboundBuffer.Consume(sent);
+    }
+    else if(sent < 0)
+    {
+        if(errno == EAGAIN || errno == EWOULDBLOCK)
             return true;
 
-        struct iovec iov[2];
-        for(int i = 0; i < rr.count; ++i)
-        {
-            iov[i].iov_base = rr.regions[i].ptr;
-            iov[i].iov_len = rr.regions[i].len;
-        }
-
-        struct msghdr msg = {};
-        msg.msg_iov = iov;
-        msg.msg_iovlen = rr.count;
-
-        // Send using MSG_NOSIGNAL to avoid crashing on broken pipes
-        ssize_t sent = sendmsg(client->fd, &msg, MSG_NOSIGNAL);
-
-        if(sent > 0)
-        {
-            // Update the RingBuffer's head
-            client->outboundBuffer.Consume(sent);
-        }
-        else if(sent < 0)
-        {
-            if(errno == EAGAIN || errno == EWOULDBLOCK)
-                return true;
-
-            return false; // Error (e.g., EPIPE or ECONNRESET)
-        }
-
-        // If buffer is empty, we don't need EPOLLOUT anymore
-        client->wantsWrite = (client->outboundBuffer.Size() > 0);
-        return true;
+        return false; // Error (e.g., EPIPE or ECONNRESET)
     }
 
-    bool EpollServer::ClientContext::Send(const void* data, size_t len)
+    // If buffer is empty, we don't need EPOLLOUT anymore
+    client->wantsWrite = (client->outboundBuffer.Size() > 0);
+    return true;
+}
+
+template<typename F>
+bool EpollServer::ConsumeReceived(gen::EpollServer::ClientContext* client, size_t len, F&& processor)
+{
+    RingBuffer& inboundBuffer = client->inboundBuffer;
+    if(len == 0 || len > inboundBuffer.Size())
+        return false;
+
+    // Get the 1 or 2 contiguous segments from the RingBuffer
+    auto rr = inboundBuffer.GetReadRegions(0, len);
+
+    // Execute the user logic on the segments
+    for(int i = 0; i < rr.count; ++i)
     {
-        // Check if the RingBuffer has enough contiguous or wrapped space
-        if(outboundBuffer.FreeSpace() < len)
-            return false;
-
-        outboundBuffer.Write(static_cast<const uint8_t*>(data), len);
-
-        // Signal the epoll loop that this socket has data pending
-        wantsWrite = true;
-        return true;
+        processor(static_cast<const uint8_t*>(rr.regions[i].ptr), rr.regions[i].len);
     }
 
-    template <typename F>
-    bool EpollServer::ClientContext::ConsumeReceived(size_t len, F&& processor)
+    // Finalize: Remove the data from the buffer
+    inboundBuffer.Consume(len);
+    return true;
+}
+
+bool EpollServer::Send(gen::EpollServer::ClientContext* client, const void* data, size_t len)
+{
+    RingBuffer& outboundBuffer = client->outboundBuffer;
+
+    // Check if the RingBuffer has enough contiguous or wrapped space
+    if(outboundBuffer.FreeSpace() < len)
+        return false;
+
+    outboundBuffer.Write(static_cast<const uint8_t*>(data), len);
+
+    // Signal the epoll loop that this socket has data pending
+    client->wantsWrite = true;
+    return true;
+}
+
+EpollServer::RecvStatus EpollServer::Receive(std::shared_ptr<gen::EpollServer::ClientContext>& client)
+{
+    RingBuffer& inboundBuffer = client->inboundBuffer;
+    int fd = client->fd;
+
+    while(true)
     {
-        if(len == 0 || len > inboundBuffer.Size())
-            return false;
-
-        // Get the 1 or 2 contiguous segments from the RingBuffer
-        auto rr = inboundBuffer.GetReadRegions(0, len);
-
-        // Execute the user logic on the segments
-        for(int i = 0; i < rr.count; ++i)
+        auto wr = inboundBuffer.GetWriteRegions();
+        if(wr.count == 0)
         {
-            processor(static_cast<const uint8_t*>(rr.regions[i].ptr), rr.regions[i].len);
-        }
-
-        // Finalize: Remove the data from the buffer
-        inboundBuffer.Consume(len);
-        return true;
-    }
-
-    EpollServer::ClientContext::RecvStatus EpollServer::ClientContext::Receive(std::string & errMsg)
-    {
-        while(true)
-        {
-            auto wr = inboundBuffer.GetWriteRegions();
-            if(wr.count == 0)
-            {
-                errMsg = "Inbound buffer full";
-                return RecvStatus::ERROR;
-            }
-
-            struct iovec iov[2];
-            for(int i = 0; i < wr.count; ++i)
-            {
-                iov[i].iov_base = wr.regions[i].ptr;
-                iov[i].iov_len = wr.regions[i].len;
-            }
-
-            ssize_t n = readv(fd, iov, wr.count);
-
-            if(n > 0)
-            {
-                inboundBuffer.CommitWrite(n);
-                // If we filled the requested space, there might be more in the kernel
-                if(static_cast<size_t>(n) < (iov[0].iov_len + (wr.count > 1 ? iov[1].iov_len : 0)))
-                    return RecvStatus::OK;
-                continue;
-            }
-            else if(n == 0)
-                return RecvStatus::DISCONNECT;
-            else if(errno == EAGAIN || errno == EWOULDBLOCK)
-                return RecvStatus::OK;
-            else if(errno == EINTR)
-                continue;
-
-            errMsg = strerror(errno);
+            OnError(__FNAME__, __LINE__, "Receive error: Inbound buffer full");
             return RecvStatus::ERROR;
         }
+
+        struct iovec iov[2];
+        for(int i = 0; i < wr.count; ++i)
+        {
+            iov[i].iov_base = wr.regions[i].ptr;
+            iov[i].iov_len = wr.regions[i].len;
+        }
+
+        ssize_t n = readv(fd, iov, wr.count);
+
+        if(n > 0)
+        {
+            inboundBuffer.CommitWrite(n);
+            // If we filled the requested space, there might be more in the kernel
+            if(static_cast<size_t>(n) < (iov[0].iov_len + (wr.count > 1 ? iov[1].iov_len : 0)))
+                return RecvStatus::OK;
+            continue;
+        }
+        else if(n == 0)
+            return RecvStatus::DISCONNECT;
+        else if(errno == EAGAIN || errno == EWOULDBLOCK)
+            return RecvStatus::OK;
+        else if(errno == EINTR)
+            continue;
+
+        OnError(__FNAME__, __LINE__, "Receive error: " + std::string(strerror(errno)));
+        return RecvStatus::ERROR;
     }
+}
 
 } // namespace gen
 

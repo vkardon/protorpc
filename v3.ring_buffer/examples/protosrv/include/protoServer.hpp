@@ -67,6 +67,8 @@ private:
 
     struct ClientContextImpl : public ClientContext
     {
+        ClientContextImpl(ProtoServer& srv) : ClientContext(srv) {}
+
         enum class MessageState { READING_CODE=1, READING_LEN, READING_DATA };
         MessageState messageState{MessageState::READING_CODE};
         
@@ -86,7 +88,7 @@ private:
         }
     };
 
-    std::shared_ptr<ClientContext> MakeClientContext() override final { return std::make_shared<ClientContextImpl>(); }
+    std::shared_ptr<ClientContext> MakeClientContext() override final { return std::make_shared<ClientContextImpl>(*this); }
     bool OnDataReceived(std::shared_ptr<ClientContext>& clientIn) override final;
 
     bool ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val);
@@ -154,7 +156,7 @@ inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& clien
     uint32_t data{0};
     uint8_t* dataPtr = reinterpret_cast<uint8_t*>(&data);
 
-    bool result = client->ConsumeReceived(sizeof(uint32_t), [&](const uint8_t* ptr, size_t len)
+    bool result = client->ConsumeReceived(sizeof(uint32_t), [&](const uint8_t* ptr, size_t len) 
         {
             // This lambda might be called twice if the data wraps around the ring!
             std::memcpy(dataPtr, ptr, len);
@@ -173,7 +175,7 @@ inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& clien
     std::string data;
     data.reserve(client->expectedLen); // Pre-allocate for efficiency
 
-    bool result = client->ConsumeReceived(client->expectedLen, [&](const uint8_t* ptr, size_t len) 
+    bool result = client->ConsumeReceived(client->expectedLen, [&](const uint8_t* ptr, size_t len)
         {
             // This lambda might be called twice if the data wraps around the ring!
             data.append(reinterpret_cast<const char*>(ptr), len);
@@ -253,7 +255,7 @@ inline void ProtoServer::EnqueueProtoData(std::shared_ptr<ClientContextImpl>& cl
     EnqueueProtoCode(client, code);
     uint32_t len = htonl(static_cast<uint32_t>(data.length()));
     client->Send(&len, sizeof(len));
-    if(data.length() > 0) 
+    if(data.length() > 0)
         client->Send(data.data(), data.length());
 }
 

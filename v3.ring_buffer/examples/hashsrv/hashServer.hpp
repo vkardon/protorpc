@@ -13,10 +13,14 @@ public:
 private:
     struct ClientContextImpl : public ClientContext
     {
+        ClientContextImpl(EpollServer& srv) : ClientContext(srv) {}
         Hasher hasher;
     };
 
-    std::shared_ptr<gen::EpollServer::ClientContext> MakeClientContext() override { return std::make_shared<ClientContextImpl>(); }
+    std::shared_ptr<gen::EpollServer::ClientContext> MakeClientContext() override 
+    { 
+        return std::make_shared<ClientContextImpl>(*this); 
+    }
     
     // Triggered when new data is available in client->inboundBuffer
     bool OnDataReceived(std::shared_ptr<ClientContext>& clientIn) override;
@@ -25,13 +29,14 @@ private:
 inline bool HashServer::OnDataReceived(std::shared_ptr<ClientContext>& clientIn)
 {
     auto client = std::static_pointer_cast<ClientContextImpl>(clientIn);
+    gen::RingBuffer& inboundBuffer = client->GetInboundBuffer();
 
-    while(client->GetReceivedSize() > 0)
+    while(inboundBuffer.Size() > 0)
     {
         int newlineIdx = -1;
-        for(size_t i = 0; i < client->GetReceivedSize(); ++i)
+        for(size_t i = 0; i < inboundBuffer.Size(); ++i)
         {
-            if(client->GetReceivedByte(i) == '\n')
+            if(inboundBuffer[i] == '\n')
             {
                 newlineIdx = static_cast<int>(i);
                 break;
@@ -45,7 +50,7 @@ inline bool HashServer::OnDataReceived(std::shared_ptr<ClientContext>& clientIn)
         size_t remainingDataToHash = newlineIdx;     // We only want to hash up to '\n'
 
         // Handle CRLF
-        if(remainingDataToHash > 0 && client->GetReceivedByte(remainingDataToHash - 1) == '\r')
+        if(remainingDataToHash > 0 && inboundBuffer[remainingDataToHash - 1] == '\r')
             remainingDataToHash--;
 
         // Processes text and removes text + \n
