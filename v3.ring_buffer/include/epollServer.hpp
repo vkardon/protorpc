@@ -57,9 +57,6 @@ protected:
         virtual ~ClientContext() = default;
 
         RingBuffer& GetInboundBuffer() { return inboundBuffer ; }
-
-        template<typename F>
-        bool ConsumeReceived(size_t len, F&& processor) { return srv.ConsumeReceived(this, len, processor); }
         bool Send(const void* data, size_t len) { return srv.Send(this, data, len); }
 
     private: 
@@ -90,9 +87,6 @@ private:
     bool IsTcpSocket() const { return !IsUnixSocket(); }
     bool FlushOutboundBuffer(std::shared_ptr<ClientContext>& client);
     int GetMaxFiles();
-
-    template<typename F>
-    bool ConsumeReceived(ClientContext* client, size_t len, F&& processor);
     bool Send(ClientContext* client, const void* data, size_t len);
 
     enum class RecvStatus
@@ -558,27 +552,6 @@ bool gen::EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& clien
 
     // If buffer is empty, we don't need EPOLLOUT anymore
     client->wantsWrite = (client->outboundBuffer.Size() > 0);
-    return true;
-}
-
-template<typename F>
-bool EpollServer::ConsumeReceived(gen::EpollServer::ClientContext* client, size_t len, F&& processor)
-{
-    RingBuffer& inboundBuffer = client->inboundBuffer;
-    if(len == 0 || len > inboundBuffer.Size())
-        return false;
-
-    // Get the 1 or 2 contiguous segments from the RingBuffer
-    auto rr = inboundBuffer.GetReadRegions(0, len);
-
-    // Execute the user logic on the segments
-    for(int i = 0; i < rr.count; ++i)
-    {
-        processor(static_cast<const uint8_t*>(rr.regions[i].ptr), rr.regions[i].len);
-    }
-
-    // Finalize: Remove the data from the buffer
-    inboundBuffer.Consume(len);
     return true;
 }
 

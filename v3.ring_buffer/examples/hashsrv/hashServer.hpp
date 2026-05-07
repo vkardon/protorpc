@@ -53,17 +53,20 @@ inline bool HashServer::OnDataReceived(std::shared_ptr<ClientContext>& clientIn)
         if(remainingDataToHash > 0 && inboundBuffer[remainingDataToHash - 1] == '\r')
             remainingDataToHash--;
 
-        // Processes text and removes text + \n
-        client->ConsumeReceived(totalBytesToConsume, [&](const uint8_t* ptr, size_t len) 
-            {
-                if(remainingDataToHash > 0)
-                {
-                    // Only hash the portion of this segment that is actual data
-                    size_t toHash = std::min(len, remainingDataToHash);
-                    client->hasher.Update(ptr, toHash);
-                    remainingDataToHash -= toHash;
-                }
-            });
+        // Get the 1 or 2 contiguous segments from the RingBuffer
+        gen::RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, totalBytesToConsume);
+
+        // Processes text
+        for(int i = 0; i < rr.count && remainingDataToHash > 0; ++i)
+        {
+            // Only hash the portion of this segment that is actual data
+            size_t toHash = std::min(rr.regions[i].len, remainingDataToHash);
+            client->hasher.Update(rr.regions[i].ptr, toHash);
+            remainingDataToHash -= toHash;
+        }
+
+        // Finalize: Remove the text + \n from the buffer
+        inboundBuffer.Consume(totalBytesToConsume);
 
         size_t resLen = 0;
         const char* hex = client->hasher.FinalizeHex(resLen);

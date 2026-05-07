@@ -94,10 +94,10 @@ private:
     bool ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val);
     bool ReceiveString(std::shared_ptr<ClientContextImpl>& client, std::string& str);
 
-    bool HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
-    void EnqueueProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
-    void EnqueueProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
+    void SendProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
+    void SendProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
 
+    bool HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, std::string&& data);
     bool ParseMetadata(const char* buffer, size_t bufferSize,
                        std::map<std::string, std::string>& data, std::string& errMsg);
 
@@ -114,18 +114,18 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
     {
         if(client->messageState == ClientContextImpl::MessageState::READING_CODE)
         {
-            uint32_t val{0};
-            if(!ReceiveUint32(client, val))
+            uint32_t code{0};
+            if(!ReceiveUint32(client, code))
                 break;  // Wait for more data to receive
-            client->currentCode = static_cast<PROTO_CODE>(val);
+            client->currentCode = static_cast<PROTO_CODE>(code);
             client->messageState = ClientContextImpl::MessageState::READING_LEN;
         }
         else if(client->messageState == ClientContextImpl::MessageState::READING_LEN)
         {
-            uint32_t val{0};
-            if(!ReceiveUint32(client, val))
+            uint32_t len{0};
+            if(!ReceiveUint32(client, len))
                 break; // Wait for more data to receive
-            client->expectedLen = val;
+            client->expectedLen = len;
             client->messageState = ClientContextImpl::MessageState::READING_DATA;
         }
         else if(client->messageState == ClientContextImpl::MessageState::READING_DATA)
@@ -135,7 +135,7 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
                 break; // Wait for more data to receive
 
             // Process the frame
-            if(!HandleFinishedFrame(client, client -> currentCode, data))
+            if(!HandleFinishedFrame(client, client -> currentCode, std::move(data)))
             {
                 // Fatal error (e.g. malformed metadata):
                 // We return false, EpollServer kills the connection.
@@ -153,18 +153,26 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
 
 inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val)
 {
-    uint32_t data{0};
-    uint8_t* dataPtr = reinterpret_cast<uint8_t*>(&data);
-
-    bool result = client->ConsumeReceived(sizeof(uint32_t), [&](const uint8_t* ptr, size_t len) 
-        {
-            // This lambda might be called twice if the data wraps around the ring!
-            std::memcpy(dataPtr, ptr, len);
-            dataPtr += len;
-        });
-
-    if(!result)
+    size_t dataLen = sizeof(uint32_t);
+    RingBuffer& inboundBuffer = client->GetInboundBuffer();
+    if(dataLen == 0 || dataLen > inboundBuffer.Size())
         return false;
+
+    // Get the 1 or 2 contiguous segments from the RingBuffer
+    RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, dataLen);
+    uint32_t data{0};
+    char* dataPtr = reinterpret_cast<char*>(&data);
+
+    for(int i = 0; i < rr.count; ++i)
+    {
+        const char* ptr = reinterpret_cast<const char*>(rr.regions[i].ptr);
+        size_t len = rr.regions[i].len;
+        for(size_t j = 0; j < len; j++)
+            *dataPtr++ = ptr[j];
+    }
+
+    // Finalize: Remove the data from the buffer
+    inboundBuffer.Consume(dataLen);
 
     val = ntohl(data);
     return true;
@@ -172,46 +180,52 @@ inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& clien
 
 inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& client, std::string& str)
 {
-    std::string data;
-    data.reserve(client->expectedLen); // Pre-allocate for efficiency
-
-    bool result = client->ConsumeReceived(client->expectedLen, [&](const uint8_t* ptr, size_t len)
-        {
-            // This lambda might be called twice if the data wraps around the ring!
-            data.append(reinterpret_cast<const char*>(ptr), len);
-        });
-
-    if(!result)
+    size_t len = client->expectedLen;
+    RingBuffer& inboundBuffer = client->GetInboundBuffer();
+    if(len == 0 || len > inboundBuffer.Size())
         return false;
+
+    // Get the 1 or 2 contiguous segments from the RingBuffer
+    RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, len);
+    std::string data;
+    data.reserve(len);
+
+    for(int i = 0; i < rr.count; ++i)
+    {
+        data.append(reinterpret_cast<const char*>(rr.regions[i].ptr), rr.regions[i].len);
+    }
+
+    // Finalize: Remove the data from the buffer
+    inboundBuffer.Consume(len);
 
     str = std::move(data);
     return true;
 }
 
 inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, 
-                                             PROTO_CODE code, const std::string& data)
+                                             PROTO_CODE code, std::string&& data)
 {
     bool result = true;
 
     if(code == PROTO_CODE::REQ_NAME)
     {
-        client->reqName = data;
         auto itr = mHandlerMap.find(data);
         if(itr != mHandlerMap.end())
         {
+            client->reqName = std::move(data);
             client->handler = itr->second.get();
-            EnqueueProtoCode(client, PROTO_CODE::ACK);
+            SendProtoCode(client, PROTO_CODE::ACK);
         }
         else
         {
-            EnqueueProtoCode(client, PROTO_CODE::NACK);
-            EnqueueProtoData(client, PROTO_CODE::ERR, "Unknown request: " + data);
+            SendProtoCode(client, PROTO_CODE::NACK);
+            SendProtoData(client, PROTO_CODE::ERR, "Unknown request: " + data);
             client->Reset();
         }
     }
     else if(code == PROTO_CODE::REQ)
     {
-        client->reqData = data;
+        client->reqData = std::move(data);
     }
     else if(code == PROTO_CODE::METADATA)
     {
@@ -224,13 +238,14 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
                 std::string respData;
                 Context ctx(metadata);
                 client->handler->Call(ctx, client->reqData, respData);
-                EnqueueProtoData(client, PROTO_CODE::RESP, respData);
-                EnqueueProtoData(client, PROTO_CODE::ERR, ctx.GetError());
+                SendProtoData(client, PROTO_CODE::RESP, respData);
+                SendProtoData(client, PROTO_CODE::ERR, ctx.GetError());
             }
         }
         else
         {
             // If parsing fails, the client sent garbage.
+            OnError(__FNAME__, __LINE__, "Failed parsing metadata for request '" + client->reqName + "'");
             result = false;
         }
         client->Reset();
@@ -241,18 +256,19 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
         result = false;
     }
 
+    data.clear(); // It could be already empty after std::move
     return result;
 }
 
-inline void ProtoServer::EnqueueProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code)
+inline void ProtoServer::SendProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code)
 {
     uint32_t val = htonl(static_cast<uint32_t>(code));
     client->Send(&val, sizeof(val));
 }
 
-inline void ProtoServer::EnqueueProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data)
+inline void ProtoServer::SendProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data)
 {
-    EnqueueProtoCode(client, code);
+    SendProtoCode(client, code);
     uint32_t len = htonl(static_cast<uint32_t>(data.length()));
     client->Send(&len, sizeof(len));
     if(data.length() > 0)
