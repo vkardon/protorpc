@@ -31,43 +31,33 @@ inline bool HashServer::OnDataReceived(std::shared_ptr<ClientContext>& clientIn)
     auto client = std::static_pointer_cast<ClientContextImpl>(clientIn);
     gen::RingBuffer& inboundBuffer = client->GetInboundBuffer();
 
-    while(inboundBuffer.Size() > 0)
+    while(true)
     {
-        int newlineIdx = -1;
-        for(size_t i = 0; i < inboundBuffer.Size(); ++i)
-        {
-            if(inboundBuffer[i] == '\n')
-            {
-                newlineIdx = static_cast<int>(i);
-                break;
-            }
-        }
-
+        // Search for '\n'
+        ssize_t newlineIdx = inboundBuffer.Find('\n');
         if(newlineIdx == -1)
             break;
 
-        size_t totalBytesToConsume = newlineIdx + 1; // We need to consume '\n' too
-        size_t remainingDataToHash = newlineIdx;     // We only want to hash up to '\n'
+        size_t totalBytesToConsume = newlineIdx + 1;
+        size_t dataToHash = newlineIdx;
 
-        // Handle CRLF
-        if(remainingDataToHash > 0 && inboundBuffer[remainingDataToHash - 1] == '\r')
-            remainingDataToHash--;
-
-        // Get the 1 or 2 contiguous segments from the RingBuffer
-        gen::RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, totalBytesToConsume);
-
-        // Processes text
-        for(int i = 0; i < rr.count && remainingDataToHash > 0; ++i)
+        // Handle CRLF check using operator[] (it's fine for single checks)
+        if(dataToHash > 0 && inboundBuffer[dataToHash - 1] == '\r')
         {
-            // Only hash the portion of this segment that is actual data
-            size_t toHash = std::min(rr.regions[i].len, remainingDataToHash);
-            client->hasher.Update(rr.regions[i].ptr, toHash);
-            remainingDataToHash -= toHash;
+            dataToHash--;
         }
 
-        // Finalize: Remove the text + \n from the buffer
+        // Use GetReadRegions to feed the hasher zero-copy chunks
+        auto rr = inboundBuffer.GetReadRegions(0, dataToHash);
+        for(int i = 0; i < rr.count; ++i)
+        {
+            client->hasher.Update(rr.regions[i].ptr, rr.regions[i].len);
+        }
+
+        // Clean up the buffer (including the \n)
         inboundBuffer.Consume(totalBytesToConsume);
 
+        // Finalize and Send
         size_t resLen = 0;
         const char* hex = client->hasher.FinalizeHex(resLen);
         client->Send(hex, resLen);

@@ -153,26 +153,9 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
 
 inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val)
 {
-    size_t dataLen = sizeof(uint32_t);
-    RingBuffer& inboundBuffer = client->GetInboundBuffer();
-    if(dataLen == 0 || dataLen > inboundBuffer.Size())
+    uint32_t data = 0;
+    if(!client->GetInboundBuffer().Read(data))
         return false;
-
-    // Get the 1 or 2 contiguous segments from the RingBuffer
-    RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, dataLen);
-    uint32_t data{0};
-    char* dataPtr = reinterpret_cast<char*>(&data);
-
-    for(int i = 0; i < rr.count; ++i)
-    {
-        const char* ptr = reinterpret_cast<const char*>(rr.regions[i].ptr);
-        size_t len = rr.regions[i].len;
-        for(size_t j = 0; j < len; j++)
-            *dataPtr++ = ptr[j];
-    }
-
-    // Finalize: Remove the data from the buffer
-    inboundBuffer.Consume(dataLen);
 
     val = ntohl(data);
     return true;
@@ -180,26 +163,7 @@ inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& clien
 
 inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& client, std::string& str)
 {
-    size_t len = client->expectedLen;
-    RingBuffer& inboundBuffer = client->GetInboundBuffer();
-    if(len == 0 || len > inboundBuffer.Size())
-        return false;
-
-    // Get the 1 or 2 contiguous segments from the RingBuffer
-    RingBuffer::BufferRegions rr = inboundBuffer.GetReadRegions(0, len);
-    std::string data;
-    data.reserve(len);
-
-    for(int i = 0; i < rr.count; ++i)
-    {
-        data.append(reinterpret_cast<const char*>(rr.regions[i].ptr), rr.regions[i].len);
-    }
-
-    // Finalize: Remove the data from the buffer
-    inboundBuffer.Consume(len);
-
-    str = std::move(data);
-    return true;
+    return client->GetInboundBuffer().Read(str, client->expectedLen);
 }
 
 inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, 
