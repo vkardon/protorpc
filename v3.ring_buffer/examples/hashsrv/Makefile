@@ -1,5 +1,6 @@
 # Target(s) to build
-EXE = hashserver
+EXE_SRV = hashserver
+EXE_CLN = hashclient
 DEBUG = true
 
 # Compiler and linker to use
@@ -23,7 +24,9 @@ endif
 PROJECT_HOME = .
 OBJ_DIR = $(PROJECT_HOME)/_obj
 
-SRCS = $(PROJECT_HOME)/main.cpp 
+SRCS_SRV = $(PROJECT_HOME)/server.cpp 
+
+SRCS_CLN = $(PROJECT_HOME)/client.cpp
 
 # Include directories
 INCS = -I$(PROJECT_HOME)/../../include
@@ -32,13 +35,18 @@ INCS = -I$(PROJECT_HOME)/../../include
 LIBS = -lssl -lcrypto
 
 # Objective files to build
-OBJS =  $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRCS)))))
+OBJS_SRV =  $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRCS_SRV)))))
+
+OBJS_CLN =  $(addprefix $(OBJ_DIR)/, $(addsuffix .o, $(basename $(notdir $(SRCS_CLN)))))
 
 # Build target(s)
-all: $(EXE)
+all: $(EXE_SRV) $(EXE_CLN)
 
-$(EXE): $(OBJS)
-	$(LD) $(LDFLAGS) -o $(EXE) $(OBJS) $(LIBS)
+$(EXE_SRV): $(OBJS_SRV)
+	$(LD) $(LDFLAGS) -o $(EXE_SRV) $(OBJS_SRV) $(LIBS)
+
+$(EXE_CLN): $(OBJS_CLN)
+	$(LD) $(LDFLAGS) -o $(EXE_CLN) $(OBJS_CLN) $(LIBS)
 
 # Compile source files
 # Add -MP to generate dependency list
@@ -49,11 +57,12 @@ $(OBJ_DIR)/%.o: $(PROJECT_HOME)/%.cpp Makefile
 	
 # Delete all intermediate files
 clean clear:
-	rm -rf $(EXE) $(OBJ_DIR)
+	rm -rf $(EXE_SRV) $(EXE_CLN) $(OBJ_DIR)
 
 # Read the dependency files.
 # Note: use '-' prefix to don't display error or warning
 # if include file do not exist (just remade it)
--include $(OBJS:.o=.d)
+-include $(OBJS_SRV:.o=.d)
+-include $(OBJS_CLN:.o=.d)
 
 

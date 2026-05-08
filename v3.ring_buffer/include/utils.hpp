@@ -87,6 +87,65 @@ namespace gen {
         return lastSlash;
     }
 
+    unsigned short ParseHostPort(const std::string& address, std::string& outHost, std::string& errMsg)
+    {
+        if(address.empty())
+        {
+            errMsg = "Input address is empty";
+            return 0;
+        }
+
+        // Find the last colon (to correctly handle IPv6 and standard host:port)
+        size_t lastColon = address.find_last_of(':');
+
+        // Validation: Must have a colon, and it shouldn't be the last character
+        if(lastColon == std::string::npos)
+        {
+            errMsg = "Invalid format. Expected host:port (missing ':')";
+            return 0;
+        }
+
+        if(lastColon == address.length() - 1)
+        {
+            errMsg = "Invalid format. No port number after ':'";
+            return 0;
+        }
+
+        // Split the string
+        std::string hostPart = address.substr(0, lastColon);
+        std::string portPart = address.substr(lastColon + 1);
+
+        // Handle IPv6 bracket stripping: [::1] -> ::1
+        if(!hostPart.empty() && hostPart.front() == '[' && hostPart.back() == ']')
+        {
+            errMsg = hostPart.substr(1, hostPart.length() - 2);
+        }
+
+        if(hostPart.empty())
+        {
+            errMsg = "Hostname part is empty";
+            return 0;
+        }
+
+        try
+        {
+            int port = std::stoi(portPart);
+            if(port < 1 || port > 65535)
+            {
+                throw std::out_of_range("Port out of range (1-65535)");
+            }
+
+            // Success: Assign host and return port
+            outHost = hostPart;
+            return static_cast<unsigned short>(port);
+        }
+        catch(const std::exception& e)
+        {
+            errMsg = "Error parsing port '" + portPart + "': " + e.what();
+            return 0;
+        }
+    }
+
 } // namespace gen
 
 // Macro that strips the directory path from __FILE__.
