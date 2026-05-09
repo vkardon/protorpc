@@ -124,14 +124,15 @@ inline RingBuffer::BufferRegions RingBuffer::GetReadRegions(size_t offset, size_
 
     // const_cast allows this to be stored in the void* for system calls
     BufferRegions rr;
-    rr.regions[0] = {const_cast<unsigned char*>(&mBuffer[actualStart]), firstPart};
+    rr.regions[0] = { const_cast<unsigned char*>(&mBuffer[actualStart]), firstPart };
     rr.count = 1;
 
     if(len > firstPart)
     {
-        rr.regions[1] = {const_cast<unsigned char*>(&mBuffer[0]), len - firstPart};
+        rr.regions[1] = { const_cast<unsigned char*>(&mBuffer[0]), len - firstPart };
         rr.count = 2;
     }
+    
     return rr;
 }
 
@@ -141,19 +142,20 @@ inline RingBuffer::BufferRegions RingBuffer::GetWriteRegions()
     if(freeSpace == 0)
         return BufferRegions{};
 
-    BufferRegions wr;
     // Length available from Tail to the end of the physical array
     size_t firstPart = std::min(freeSpace, mCapacity - mTail);
 
-    wr.regions[0] = {&mBuffer[mTail], firstPart};
+    BufferRegions wr;
+    wr.regions[0] = { &mBuffer[mTail], firstPart };
     wr.count = 1;
 
     if(freeSpace > firstPart)
     {
         // Wrap around: only the remaining free space
-        wr.regions[1] = {&mBuffer[0], freeSpace - firstPart};
+        wr.regions[1] = { &mBuffer[0], freeSpace - firstPart };
         wr.count = 2;
     }
+
     return wr;
 }
 
@@ -167,10 +169,14 @@ inline void RingBuffer::CommitWrite(size_t len)
 
 inline void RingBuffer::Write(const unsigned char* src, size_t len)
 {
-    // TODO: Safety check: ensure we don't overflow
-    assert(FreeSpace() >= len);
+    // Safety check: ensure we don't overflow
+    if(len > FreeSpace())
+    {
+        assert(false);
+        return;
+    }
 
-    auto wr = GetWriteRegions();
+        auto wr = GetWriteRegions();
     size_t bytesCopied = 0;
 
     for(int i = 0; i < wr.count && bytesCopied < len; ++i)
@@ -272,7 +278,7 @@ inline ssize_t RingBuffer::Find(unsigned char target) const
     // Note: memchr is significantly faster than a manual loop
     const void* res = std::memchr(firstPartPtr, target, firstPartLen);
     if(res)
-        return static_cast<const unsigned char*>(res) - firstPartPtr;
+        return (static_cast<const unsigned char*>(res) - firstPartPtr);
 
     // Check second (wrapped) part
     if(mSize > firstPartLen)
@@ -281,7 +287,7 @@ inline ssize_t RingBuffer::Find(unsigned char target) const
         const unsigned char* secondPartPtr = &mBuffer[0];
         res = std::memchr(secondPartPtr, target, secondPartLen);
         if(res)
-            return static_cast<const unsigned char*>(res) - secondPartPtr + firstPartLen;
+            return (static_cast<const unsigned char*>(res) - secondPartPtr + firstPartLen);
     }
 
     return -1;
