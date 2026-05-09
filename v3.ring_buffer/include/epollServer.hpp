@@ -517,7 +517,7 @@ inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::
     return sock;
 }
 
-bool gen::EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& client)
+inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& client)
 {
     auto rr = client->outboundBuffer.GetReadRegions(0, client->outboundBuffer.Size());
     if(rr.count == 0)
@@ -555,7 +555,7 @@ bool gen::EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& clien
     return true;
 }
 
-bool EpollServer::Send(gen::EpollServer::ClientContext* client, const void* data, size_t len)
+inline bool EpollServer::Send(gen::EpollServer::ClientContext* client, const void* data, size_t len)
 {
     RingBuffer& outboundBuffer = client->outboundBuffer;
 
@@ -570,7 +570,7 @@ bool EpollServer::Send(gen::EpollServer::ClientContext* client, const void* data
     return true;
 }
 
-EpollServer::RecvStatus EpollServer::Receive(std::shared_ptr<gen::EpollServer::ClientContext>& client)
+inline EpollServer::RecvStatus EpollServer::Receive(std::shared_ptr<gen::EpollServer::ClientContext>& client)
 {
     RingBuffer& inboundBuffer = client->inboundBuffer;
     int fd = client->fd;
