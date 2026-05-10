@@ -135,7 +135,7 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
                 break; // Wait for more data to receive
 
             // Process the frame
-            if(!HandleFinishedFrame(client, client -> currentCode, std::move(data)))
+            if(!HandleFinishedFrame(client, client->currentCode, std::move(data)))
             {
                 // Fatal error (e.g. malformed metadata):
                 // We return false, EpollServer kills the connection.
