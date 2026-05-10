@@ -67,26 +67,25 @@ protected:
         std::atomic<bool> wantsWrite{false};
         RingBuffer inboundBuffer{DEFAULT_INBOUND_BUFFER_SIZE};
         RingBuffer outboundBuffer{DEFAULT_OUTBOUND_BUFFER_SIZE};
-        size_t outboundOffset{0}; // Track how much has been sent
 
         friend class EpollServer;
     };
 
     virtual bool OnInit() { return true; }
+    virtual std::shared_ptr<ClientContext> MakeClientContext() = 0;
     virtual bool OnDataReceived(std::shared_ptr<ClientContext>& client) = 0;
     virtual bool OnDataSent(std::shared_ptr<ClientContext>& client) { return true; }
-    virtual std::shared_ptr<ClientContext> MakeClientContext() = 0;
     virtual void OnError(const char* fname, int lineNum, const std::string& err) const;
     virtual void OnInfo(const char* fname, int lineNum, const std::string& info) const;
 
 private:
-    void ReactorLoop();
+    int GetMaxFiles();
     int SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg);
     int SetupUnixSocket(const char* unixPath, int backlog, std::string& errMsg);
+    void ReactorLoop();
     bool IsUnixSocket() const { return (mUnixDomainSocket >= 0); }
     bool IsTcpSocket() const { return !IsUnixSocket(); }
     bool FlushOutboundBuffer(std::shared_ptr<ClientContext>& client);
-    int GetMaxFiles();
     bool Send(ClientContext* client, const void* data, size_t len);
 
     enum class RecvStatus
@@ -438,7 +437,7 @@ inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::st
     int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if(sock == -1)
     {
-        errMsg = "socket() failed: " + std::string(strerror(errno));
+        errMsg = "socket(AF_INET) failed: " + std::string(strerror(errno));
         return -1;
     }
 
@@ -454,14 +453,14 @@ inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::st
 
     if(bind(sock, (sockaddr*)&addr, sizeof(addr)) == -1)
     {
-        errMsg = "bind() failed: " + std::string(strerror(errno));
+        errMsg = "bind(AF_INET) failed: " + std::string(strerror(errno));
         close(sock);
         return -1;
     }
 
     if(listen(sock, backlog) == -1)
     {
-        errMsg = "listen() failed: " + std::string(strerror(errno));
+        errMsg = "listen(AF_INET) failed: " + std::string(strerror(errno));
         close(sock);
         return -1;
     }
@@ -502,14 +501,14 @@ inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::
 
     if(bind(sock, (struct sockaddr*)&addr, addrLen) == -1)
     {
-        errMsg = "bind(UDS) failed: " + std::string(strerror(errno));
+        errMsg = "bind(AF_UNIX) failed: " + std::string(strerror(errno));
         close(sock);
         return -1;
     }
 
     if(listen(sock, backlog) == -1)
     {
-        errMsg = "listen(UDS) failed: " + std::string(strerror(errno));
+        errMsg = "listen(AF_UNIX) failed: " + std::string(strerror(errno));
         close(sock);
         return -1;
     }

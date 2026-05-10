@@ -93,9 +93,11 @@ int main()
     // Create MyServer
     unsigned int threadsCount = std::thread::hardware_concurrency();
     MyServer server(threadsCount);
-//    server.SetVerbose(true);
+    server.SetMaxSendMessageSize(4 * 1024 * 1024);      // 4MB
+    server.SetMaxReceiveMessageSize(4 * 1024 * 1024);   // 4MB
+    //server.SetVerbose(true);
 
- //    if(!server.Start(8080))
+    //if(!server.Start(8080))
     if(!server.Start("\0protoserver_domain_socket.sock"))
     {
         std::cerr << "Failed to start the epoll server." << std::endl;

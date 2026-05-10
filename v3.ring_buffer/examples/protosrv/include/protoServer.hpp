@@ -16,6 +16,10 @@ public:
     ProtoServer(int threadPoolSize) : EpollServer(threadPoolSize) {}
     ~ProtoServer() override = default;
 
+    // Set the max send/receive message size
+    void SetMaxSendMessageSize(size_t size) { SetOutboundBufferSize(size); }
+    void SetMaxReceiveMessageSize(size_t size) { SetInboundBufferSize(size); }
+
 protected:
     struct Context
     {
