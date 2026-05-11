@@ -56,7 +56,7 @@ private:
     struct Handler
     {
         virtual ~Handler() = default;
-        virtual bool Call(const Context& ctx, const std::string& reqData, std::string& respData) = 0;
+        virtual bool Call(const Context& ctx, const std::string_view reqData, std::string& respData) = 0;
     };
 
     template<class SERVER, class REQ, class RESP>
@@ -64,7 +64,7 @@ private:
     {
         typedef void (SERVER::*HANDLER_FPTR)(const Context& ctx, const REQ&, RESP&);
         HandlerImpl(SERVER* _srv, HANDLER_FPTR _fptr) : srv(_srv), fptr(_fptr) {}
-        bool Call(const Context& ctx, const std::string& reqData, std::string& respData) override;
+        bool Call(const Context& ctx, const std::string_view reqData, std::string& respData) override;
         SERVER* srv;
         HANDLER_FPTR fptr;
     };
@@ -81,14 +81,14 @@ private:
 
         Handler* handler{nullptr};
         std::string reqName;
-        std::string reqData;
+        std::map<std::string, std::string> metadata;
 
         void Reset()
         {
             messageState = MessageState::READING_CODE;
             handler = nullptr;
             reqName.clear();
-            reqData.clear();
+            metadata.clear();
         }
     };
 
@@ -204,7 +204,7 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
         auto itr = mHandlerMap.find(data);
         if(itr != mHandlerMap.end())
         {
-            client->reqName = std::move(data);
+            client->reqName = data;
             client->handler = itr->second.get();
             SendProtoCode(client, PROTO_CODE::ACK);
         }
@@ -217,30 +217,25 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
     }
     else if(code == PROTO_CODE::REQ)
     {
-        client->reqData = std::move(data);
+        if(client->handler)
+        {
+            std::string respData;
+            Context ctx(client->metadata);
+            /*bool res =*/ client->handler->Call(ctx, data, respData);
+            SendProtoData(client, PROTO_CODE::RESP, respData);
+            SendProtoData(client, PROTO_CODE::ERR, ctx.GetError());
+        }
+        client->Reset();
     }
     else if(code == PROTO_CODE::METADATA)
     {
-        std::map<std::string, std::string> metadata;
         std::string errMsg;
-        if(ParseMetadata(data.data(), data.size(), metadata, errMsg))
-        {
-            if(client->handler)
-            {
-                std::string respData;
-                Context ctx(metadata);
-                client->handler->Call(ctx, client->reqData, respData);
-                SendProtoData(client, PROTO_CODE::RESP, respData);
-                SendProtoData(client, PROTO_CODE::ERR, ctx.GetError());
-            }
-        }
-        else
+        if(!ParseMetadata(data.data(), data.size(), client->metadata, errMsg))
         {
             // If parsing fails, the client sent garbage.
-            OnError(__FNAME__, __LINE__, "Failed parsing metadata for request '" + client->reqName + "'");
+            OnError(__FNAME__, __LINE__, "Failed parsing metadata for request '" + client->reqName + "':" + errMsg);
             result = false;
         }
-        client->Reset();
     }
     else
     {
@@ -248,7 +243,6 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
         result = false;
     }
 
-    //data.clear(); // It could be already empty after std::move
     return result;
 }
 
@@ -268,10 +262,10 @@ inline void ProtoServer::SendProtoData(std::shared_ptr<ClientContextImpl>& clien
 }
 
 template<class SERVER, class REQ, class RESP>
-bool ProtoServer::HandlerImpl<SERVER, REQ, RESP>::Call(const ProtoServer::Context& ctx, const std::string& reqData, std::string& respData)
+bool ProtoServer::HandlerImpl<SERVER, REQ, RESP>::Call(const ProtoServer::Context& ctx, const std::string_view reqData, std::string& respData)
 {
     REQ req;
-    if(!req.ParseFromString(reqData)) 
+    if(!req.ParseFromArray(reqData.data(), reqData.size())) 
         return false;
     RESP resp;
     (srv->*fptr)(ctx, req, resp);

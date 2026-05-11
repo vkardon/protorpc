@@ -76,7 +76,7 @@ private:
     //    std::cout << __func__
     //              << ": sessionId='" << ctx.GetMetadata("sessionId") << "'"
     //              << ", requestId='" << ctx.GetMetadata("reportId") << "'"
-    //              << ", req=" << req.from() << std::endl;
+    //              << ", req='" << req.from() << "'" << std::endl;
 
         resp.set_msg("Pong");
     }
