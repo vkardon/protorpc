@@ -101,12 +101,14 @@ private:
     void SendProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
     void SendProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
 
-    bool HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, std::string&& data);
+    bool HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
     bool ParseMetadata(const char* buffer, size_t bufferSize,
                        std::map<std::string, std::string>& data, std::string& errMsg);
 
 private:
-    std::map<const std::string, std::unique_ptr<Handler>> mHandlerMap;
+    // Note: Using std::less<> (Heterogeneous Lookup) allows comparing
+    // the view to the string without creating a temporary std::string copy
+    std::map<std::string, std::unique_ptr<Handler>, std::less<>> mHandlerMap;
 };
 
 inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientContext>& clientIn)
@@ -134,12 +136,11 @@ inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientConte
         }
         else if(client->messageState == ClientContextImpl::MessageState::READING_DATA)
         {
-            std::string data;
-            if(!ReceiveString(client, data))
+            if(client->GetInboundBuffer().Size() < client->expectedLen)
                 break; // Wait for more data to receive
 
             // Process the frame
-            if(!HandleFinishedFrame(client, client->currentCode, std::move(data)))
+            if(!HandleFinishedFrame(client, client->currentCode))
             {
                 // Fatal error (e.g. malformed metadata):
                 // We return false, EpollServer kills the connection.
@@ -170,9 +171,32 @@ inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& clien
     return client->GetInboundBuffer().Read(str, client->expectedLen);
 }
 
-inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, 
-                                             PROTO_CODE code, std::string&& data)
+inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code)
 {
+    auto views = client->GetInboundBuffer().PeekAsViews(client->expectedLen);
+    if(views.TotalSize() < client->expectedLen)
+        return false; // This function should only be called when data is available
+
+    std::string_view data;
+    std::string tmp;
+
+    if(views.IsContiguous())
+    {
+        // The single string_view has all the data
+        data = views.first;
+    } 
+    else
+    {
+        // Fallback: The data is split - copy into a temporary buffer/string to have contiguity.
+        tmp.reserve(views.first.size() + views.second.size()); // Pre-allocate memory
+        tmp.append(views.first);
+        tmp.append(views.second);
+        data = tmp;
+    }
+
+    // Remove the data from the RingBuffer once processed
+    client->GetInboundBuffer().Consume(views.TotalSize());
+
     bool result = true;
 
     if(code == PROTO_CODE::REQ_NAME)
@@ -187,7 +211,7 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
         else
         {
             SendProtoCode(client, PROTO_CODE::NACK);
-            SendProtoData(client, PROTO_CODE::ERR, "Unknown request: " + data);
+            SendProtoData(client, PROTO_CODE::ERR, "Unknown request: " + std::string(data));
             client->Reset();
         }
     }
@@ -224,7 +248,7 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
         result = false;
     }
 
-    data.clear(); // It could be already empty after std::move
+    //data.clear(); // It could be already empty after std::move
     return result;
 }
 

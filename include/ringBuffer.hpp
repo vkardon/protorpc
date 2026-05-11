@@ -7,6 +7,7 @@
 #include <sys/uio.h>
 #include <vector>
 #include <cassert>
+#include <string_view>
 
 namespace gen {
 
@@ -28,6 +29,18 @@ public:
         int count{0};
     };
 
+    struct PeekViews
+    {
+        std::string_view first;
+        std::string_view second;
+
+        // Helper to check if we can treat this as a single block
+        bool IsContiguous() const { return second.empty(); }
+
+        // Returns total length of both views
+        size_t TotalSize() const { return first.size() + second.size(); }
+    };
+
     size_t Size() const { return mSize; }
     size_t Capacity() const { return mCapacity; }
     size_t FreeSpace() const { return mCapacity - mSize; }
@@ -45,6 +58,8 @@ public:
     // Copies 'len' bytes into 'dst' WITHOUT removing them from the buffer.
     // This handles the wrap-around logic internally.
     bool Peek(void* dst, size_t len) const;
+
+    PeekViews PeekAsViews(size_t len) const;
 
     // Copies 'len' bytes into 'dst' and consumes them.
     // This is the high-performance workhorse for strings and arrays.
@@ -291,6 +306,30 @@ inline ssize_t RingBuffer::Find(unsigned char target) const
     }
 
     return -1;
+}
+
+inline RingBuffer::PeekViews RingBuffer::PeekAsViews(size_t len) const
+{
+    // Only return what we actually have
+    size_t available = std::min(len, mSize);
+    if(available == 0) 
+        return {};
+
+    // Calculate how much is available before the physical end of the buffer
+    size_t firstPartLen = std::min(available, mCapacity - mHead);
+
+    std::string_view v1(reinterpret_cast<const char*>(&mBuffer[mHead]), firstPartLen);
+
+    // If we need more than what was at the end, grab the rest from the start
+    if(available > firstPartLen)
+    {
+        std::string_view v2(reinterpret_cast<const char*>(&mBuffer[0]), available - firstPartLen);
+        return { v1, v2 };
+    }
+    else
+    {
+        return { v1, {} };
+    }
 }
 
 } // namespace gen
