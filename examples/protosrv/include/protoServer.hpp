@@ -176,29 +176,34 @@ inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& clien
 
 inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code)
 {
-    auto views = client->GetInboundBuffer().PeekAsViews(client->expectedLen);
-    if(views.TotalSize() < client->expectedLen)
-        return false; // This function should only be called when data is available
+    gen::RingBuffer& inboundBuffer = client->GetInboundBuffer();
+    size_t dataLen = client->expectedLen;
 
+    // Note: HandleFinishedFrame function must only be called when data is available.
+    // GetReadRegions returns no regions if the RingBuffer size is less than the requested length
+    auto rr = inboundBuffer.GetReadRegions(0, dataLen);
+    if(rr.count == 0 || (rr.regions[0].len + rr.regions[1].len) != dataLen)
+        return false; 
+    
     std::string_view data;
     std::string tmp;
 
-    if(views.IsContiguous())
+    if(rr.count == 1)
     {
         // The single string_view has all the data
-        data = views.first;
+        data = { static_cast<const char*>(rr.regions[0].ptr), rr.regions[0].len };
     } 
     else
     {
         // Fallback: The data is split - copy into a temporary buffer/string to have contiguity.
-        tmp.reserve(views.first.size() + views.second.size()); // Pre-allocate memory
-        tmp.append(views.first);
-        tmp.append(views.second);
+        tmp.reserve(rr.regions[0].len + rr.regions[1].len); // Pre-allocate memory
+        tmp.append(static_cast<const char*>(rr.regions[0].ptr), rr.regions[0].len);
+        tmp.append(static_cast<const char*>(rr.regions[1].ptr), rr.regions[1].len);
         data = tmp;
     }
 
     // Remove the data from the RingBuffer once processed
-    client->GetInboundBuffer().Consume(views.TotalSize());
+    inboundBuffer.Consume(dataLen);
 
     bool result = true;
 
