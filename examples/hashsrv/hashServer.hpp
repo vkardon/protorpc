@@ -17,13 +17,13 @@ private:
         Hasher hasher;
     };
 
-    std::shared_ptr<gen::EpollServer::ClientContext> MakeClientContext() override 
+    std::shared_ptr<gen::EpollServer::ClientContext> MakeClientContext() override final
     { 
         return std::make_shared<ClientContextImpl>(*this); 
     }
     
     // Triggered when new data is available in client->inboundBuffer
-    bool OnDataReceived(std::shared_ptr<ClientContext>& clientIn) override;
+    bool OnDataReceived(std::shared_ptr<ClientContext>& clientIn) override final;
 };
 
 inline bool HashServer::OnDataReceived(std::shared_ptr<ClientContext>& clientIn)

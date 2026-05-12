@@ -85,15 +85,12 @@ private:
     std::shared_ptr<ClientContext> MakeClientContext() override final { return std::make_shared<ClientContextImpl>(*this); }
     bool OnDataReceived(std::shared_ptr<ClientContext>& clientIn) override final;
 
-    bool ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val);
-    bool ReceiveString(std::shared_ptr<ClientContextImpl>& client, std::string& str);
-
-    void SendProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
     void SendProtoCode(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
+    void SendProtoData(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code, const std::string& data);
 
+    bool ReceiveUint32(std::shared_ptr<ClientContextImpl>& client, uint32_t& val);
     bool HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code);
-    bool ParseMetadata(const char* buffer, size_t bufferSize,
-                       std::map<std::string, std::string>& data, std::string& errMsg);
+    bool ParseMetadata(const std::string_view buffer, std::map<std::string, std::string>& metadata, std::string& errMsg);
 
 private:
     // Note: Using std::less<> (Heterogeneous Lookup) allows comparing
@@ -169,11 +166,6 @@ inline bool ProtoServer::ReceiveUint32(std::shared_ptr<ClientContextImpl>& clien
     return true;
 }
 
-inline bool ProtoServer::ReceiveString(std::shared_ptr<ClientContextImpl>& client, std::string& str)
-{
-    return client->GetInboundBuffer().Read(str, client->expectedLen);
-}
-
 inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>& client, PROTO_CODE code)
 {
     gen::RingBuffer& inboundBuffer = client->GetInboundBuffer();
@@ -226,7 +218,7 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
     else if(code == PROTO_CODE::METADATA)
     {
         std::string errMsg;
-        if(!ParseMetadata(data.data(), data.size(), client->metadata, errMsg))
+        if(!ParseMetadata(data, client->metadata, errMsg))
         {
             // If parsing fails, the client sent garbage.
             OnError(__FNAME__, __LINE__, "Failed parsing metadata for request '" + client->reqName + "':" + errMsg);
@@ -277,14 +269,14 @@ bool ProtoServer::HandlerImpl<SERVER, REQ, RESP>::Call(const ProtoServer::Contex
     return resp.SerializeToString(&respData);
 }
 
-inline bool ProtoServer::ParseMetadata(const char* buffer, size_t bufferSize,
-                                       std::map<std::string, std::string>& metadata, 
+inline bool ProtoServer::ParseMetadata(const std::string_view buffer,
+                                       std::map<std::string, std::string>& metadata,
                                        std::string& errMsg)
 {
     size_t offset = 0;
     auto CheckBuffer = [&](size_t needed) -> bool
     {
-        if(offset + needed > bufferSize)
+        if(offset + needed > buffer.size())
         {
             std::stringstream ss;
             ss << __FNAME__ << ":" << __LINE__ << " Unexpected end of buffer";
@@ -298,7 +290,7 @@ inline bool ProtoServer::ParseMetadata(const char* buffer, size_t bufferSize,
         return false;
     
     uint32_t sizeNetwork;
-    std::memcpy(&sizeNetwork, buffer + offset, sizeof(sizeNetwork));
+    std::memcpy(&sizeNetwork, buffer.data() + offset, sizeof(sizeNetwork));
     uint32_t sizeHost = ntohl(sizeNetwork);
     offset += sizeof(sizeNetwork);
 
@@ -309,28 +301,28 @@ inline bool ProtoServer::ParseMetadata(const char* buffer, size_t bufferSize,
             return false;
         
         uint32_t kLen;
-        std::memcpy(&kLen, buffer + offset, sizeof(uint32_t));
+        std::memcpy(&kLen, buffer.data() + offset, sizeof(uint32_t));
         kLen = ntohl(kLen);
         offset += sizeof(uint32_t);
 
         if(!CheckBuffer(kLen)) 
             return false;
-        
-        std::string key(buffer + offset, kLen);
+
+        std::string key(buffer.data() + offset, kLen);
         offset += kLen;
 
         if(!CheckBuffer(sizeof(uint32_t))) 
             return false;
         
         uint32_t vLen;
-        std::memcpy(&vLen, buffer + offset, sizeof(uint32_t));
+        std::memcpy(&vLen, buffer.data() + offset, sizeof(uint32_t));
         vLen = ntohl(vLen);
         offset += sizeof(uint32_t);
 
         if(!CheckBuffer(vLen)) 
             return false;
-        
-        std::string value(buffer + offset, vLen);
+
+        std::string value(buffer.data() + offset, vLen);
         offset += vLen;
 
         strmap[key] = value;
