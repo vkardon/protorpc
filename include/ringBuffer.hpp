@@ -59,6 +59,8 @@ public:
     // This handles the wrap-around logic internally.
     bool Peek(void* dst, size_t len) const;
 
+    // Handles the "wrap-around" by splitting data into two contiguous views.
+    // Note: Views become invalid if the buffer is modified (Write / Consume).
     PeekViews PeekAsViews(size_t len) const;
 
     // Copies 'len' bytes into 'dst' and consumes them.
@@ -308,9 +310,11 @@ inline ssize_t RingBuffer::Find(unsigned char target) const
     return -1;
 }
 
+// Handles the "wrap-around" by splitting data into two contiguous views.
+// Note: Views become invalid if the buffer is modified (Write / Consume).
 inline RingBuffer::PeekViews RingBuffer::PeekAsViews(size_t len) const
 {
-    // Only return what we actually have
+    // Safety check: Don't try to peek more than we actually have
     size_t available = std::min(len, mSize);
     if(available == 0) 
         return {};
@@ -318,16 +322,20 @@ inline RingBuffer::PeekViews RingBuffer::PeekAsViews(size_t len) const
     // Calculate how much is available before the physical end of the buffer
     size_t firstPartLen = std::min(available, mCapacity - mHead);
 
+    // Create the first view starting at Head
     std::string_view v1(reinterpret_cast<const char*>(&mBuffer[mHead]), firstPartLen);
 
     // If we need more than what was at the end, grab the rest from the start
+    // Check if we need a second view (the wrap-around part - grab the rest from the start)
     if(available > firstPartLen)
     {
+        // Points to the very start of the buffer for the remaining bytes
         std::string_view v2(reinterpret_cast<const char*>(&mBuffer[0]), available - firstPartLen);
         return { v1, v2 };
     }
     else
     {
+        // Everything was contiguous, second view is empty
         return { v1, {} };
     }
 }

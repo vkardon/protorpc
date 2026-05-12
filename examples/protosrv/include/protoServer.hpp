@@ -40,17 +40,7 @@ protected:
     };
 
     template<class SERVER, class REQ, class RESP>
-    bool Bind(void (SERVER::*fptr)(const Context& ctx, const REQ&, RESP&))
-    {
-        std::string reqName = REQ().GetTypeName();
-        if(mHandlerMap.find(reqName) != mHandlerMap.end())
-        {
-            OnError(__FNAME__, __LINE__, "Failed to bind request " + reqName + ": it's already bound");
-            return false;
-        }
-        mHandlerMap[reqName] = std::make_unique<HandlerImpl<SERVER, REQ, RESP>>((SERVER*)this, fptr);
-        return true;
-    }
+    bool Bind(void (SERVER::*fptr)(const Context& ctx, const REQ&, RESP&));
 
 private:
     struct Handler
@@ -110,6 +100,19 @@ private:
     // the view to the string without creating a temporary std::string copy
     std::map<std::string, std::unique_ptr<Handler>, std::less<>> mHandlerMap;
 };
+
+template <class SERVER, class REQ, class RESP>
+inline bool ProtoServer::Bind(void (SERVER::*fptr)(const ProtoServer::Context& ctx, const REQ&, RESP&))
+{
+    std::string reqName = REQ().GetTypeName();
+    if(mHandlerMap.find(reqName) != mHandlerMap.end())
+    {
+        OnError(__FNAME__, __LINE__, "Failed to bind request " + reqName + ": it's already bound");
+        return false;
+    }
+    mHandlerMap[reqName] = std::make_unique<HandlerImpl<SERVER, REQ, RESP>>((SERVER*)this, fptr);
+    return true;
+}
 
 inline bool ProtoServer::OnDataReceived(std::shared_ptr<EpollServer::ClientContext>& clientIn)
 {
@@ -215,18 +218,6 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
             client->Reset();
         }
     }
-    else if(code == PROTO_CODE::REQ)
-    {
-        if(client->handler)
-        {
-            std::string respData;
-            Context ctx(client->metadata);
-            /*bool res =*/ client->handler->Call(ctx, data, respData);
-            SendProtoData(client, PROTO_CODE::RESP, respData);
-            SendProtoData(client, PROTO_CODE::ERR, ctx.GetError());
-        }
-        client->Reset();
-    }
     else if(code == PROTO_CODE::METADATA)
     {
         std::string errMsg;
@@ -236,6 +227,15 @@ inline bool ProtoServer::HandleFinishedFrame(std::shared_ptr<ClientContextImpl>&
             OnError(__FNAME__, __LINE__, "Failed parsing metadata for request '" + client->reqName + "':" + errMsg);
             result = false;
         }
+    }
+    else if(code == PROTO_CODE::REQ)
+    {
+        std::string respData;
+        Context ctx(client->metadata);
+        /*bool res =*/client->handler->Call(ctx, data, respData);
+        SendProtoData(client, PROTO_CODE::RESP, respData);
+        SendProtoData(client, PROTO_CODE::ERR, ctx.GetError());
+        client->Reset();
     }
     else
     {
