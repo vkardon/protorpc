@@ -4,8 +4,9 @@
 #ifndef __UTILS_HPP__
 #define __UTILS_HPP__
 
-#include <iostream>
 #include <chrono>
+#include <dirent.h> // readdir
+#include <iostream>
 
 namespace gen {
 
@@ -144,6 +145,27 @@ namespace gen {
             errMsg = "Error parsing port '" + portPart + "': " + e.what();
             return 0;
         }
+    }
+
+    // Get the number of open fds for the colling process
+    int GetCurrentOpenFdCount()
+    {
+        int count = 0;
+        DIR* dir = opendir("/proc/self/fd");
+        if(dir)
+        {
+            struct dirent* entry;
+            while((entry = readdir(dir)) != nullptr)
+            {
+                // We count all entries except "." and ".." which are the current and parent directories.
+                if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+                {
+                    count++;
+                }
+            }
+            closedir(dir);
+        }
+        return count;
     }
 
 } // namespace gen

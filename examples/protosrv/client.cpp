@@ -5,32 +5,11 @@
 #include <thread>
 #include <vector>
 #include <signal.h>
-#include <dirent.h>     // readdir
 #include "protoClient.hpp"
 #include "hello.pb.h"
 
 const int PORT = 8080;
 const char* domainSocket = "\0protoserver_domain_socket.sock";
-
-int getCurrentOpenFdCount()
-{
-    int count = 0;
-    DIR* dir = opendir("/proc/self/fd");
-    if(dir)
-    {
-        struct dirent* entry;
-        while((entry = readdir(dir)) != nullptr)
-        {
-            // We count all entries except "." and ".." which are the current and parent directories.
-            if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-            {
-                count++;
-            }
-        }
-        closedir(dir);
-    }
-    return count;
-}
 
 void RunTest(int numThreads, int numOfCallsPerThread)
 {
@@ -96,13 +75,13 @@ int main()
             << "  Number of calls per thread : " << numOfCallsPerThread << "\n"
             << "  Number of runs             : " << numOfRuns << std::endl;
 
-//    std::cout << "Open files: " << getCurrentOpenFdCount() << std::endl;
+//    std::cout << "Open files: " << gen::GetCurrentOpenFdCount() << std::endl;
 
     for(int i = 0; i < numOfRuns; i++)
     {
         std::cout << "Run " << i << std::endl;
         RunTest(numOfThreadsPerRun, numOfCallsPerThread);
-//        std::cout << "Open files: " << getCurrentOpenFdCount() << std::endl;
+        // std::cout << "Open files: " << gen::GetCurrentOpenFdCount() << std::endl;
     }
 
     std::cout << "Done:\n"
