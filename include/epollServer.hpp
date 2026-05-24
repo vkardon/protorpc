@@ -601,6 +601,9 @@ inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& cli
 
 inline bool EpollServer::Send(gen::EpollServer::ClientContext* client, const void* data, size_t len)
 {
+    if(!client || client->fd == -1)
+        return false;
+
     RingBuffer& outboundBuffer = client->outboundBuffer;
 
     // Check if the RingBuffer has enough contiguous or wrapped space
