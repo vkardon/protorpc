@@ -520,7 +520,14 @@ inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& cli
 {
     auto rr = client->outboundBuffer.GetReadRegions(0, client->outboundBuffer.Size());
     if(rr.count == 0)
+    {
+        client->wantsWrite = false;
         return true;
+    }
+
+    // Note: We need t write until we hit EAGAIN, otherwise the kernel
+    // will never drop below the "unwriteable" threshold, meaning epoll
+    // will never send you another EPOLLOUT edge trigger. The socket hangs.
 
     struct iovec iov[2];
     for(int i = 0; i < rr.count; ++i)
@@ -529,28 +536,66 @@ inline bool EpollServer::FlushOutboundBuffer(std::shared_ptr<ClientContext>& cli
         iov[i].iov_len = rr.regions[i].len;
     }
 
-    struct msghdr msg = {};
-    msg.msg_iov = iov;
-    msg.msg_iovlen = rr.count;
+    int iovIdx = 0;
+    int iovCount = rr.count;
 
-    // Send using MSG_NOSIGNAL to avoid crashing on broken pipes
-    ssize_t sent = sendmsg(client->fd, &msg, MSG_NOSIGNAL);
+    while(iovCount > 0)
+    {
+        struct msghdr msg = {};
+        msg.msg_iov = &iov[iovIdx];
+        msg.msg_iovlen = iovCount;
 
-    if(sent > 0)
-    {
-        // Update the RingBuffer's head
-        client->outboundBuffer.Consume(sent);
-    }
-    else if(sent < 0)
-    {
-        if(errno == EAGAIN || errno == EWOULDBLOCK)
+        ssize_t sent = sendmsg(client->fd, &msg, MSG_NOSIGNAL);
+
+        if(sent > 0)
+        {
+            client->outboundBuffer.Consume(sent);
+
+            // Advance our local iovec pointers so we don't recalculate from the RingBuffer
+            size_t remaining = static_cast<size_t>(sent);
+            while(remaining > 0 && iovCount > 0)
+            {
+                if(remaining >= iov[iovIdx].iov_len)
+                {
+                    remaining -= iov[iovIdx].iov_len;
+                    iovIdx++;
+                    iovCount--;
+                }
+                else
+                {
+                    iov[iovIdx].iov_base = static_cast<char*>(iov[iovIdx].iov_base) + remaining;
+                    iov[iovIdx].iov_len -= remaining;
+                    remaining = 0;
+                }
+            }
+        }
+        else if(sent < 0)
+        {
+            if(errno == EINTR)
+            {
+                continue; // Interrupted by a system signal; try sending again immediately
+            }
+
+            // Check if data is actually left before returning
+            client->wantsWrite = (client->outboundBuffer.Size() > 0);
+
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                return true; // We've consumed what we could, kernel buffer full
+            }
+            
+            return false; // Terminal socket error (EPIPE, ECONNRESET, etc.)
+        }
+        else
+        {
+            // sent == 0: Treat as a temporary block or disconnect condition depending on context.
+            // Check if data is actually left before returning
+            client->wantsWrite = (client->outboundBuffer.Size() > 0);
             return true;
-
-        return false; // Error (e.g., EPIPE or ECONNRESET)
+        }
     }
 
-    // If buffer is empty, we don't need EPOLLOUT anymore
-    client->wantsWrite = (client->outboundBuffer.Size() > 0);
+    client->wantsWrite = false; // Successfully emptied the buffer completely!
     return true;
 }
 
