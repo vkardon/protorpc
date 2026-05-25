@@ -23,7 +23,6 @@
 #include "ringBuffer.hpp"
 #include "utils.hpp"
 
-constexpr int DEFAULT_BACKLOG = 1024;
 constexpr int DEFAULT_MAX_EVENTS = 1024;
 constexpr unsigned long MAX_CONNECTION_IDLE_TIME = 60;
 constexpr size_t DEFAULT_INBOUND_BUFFER_SIZE = 4 * 1024;            // 4 KB
@@ -35,12 +34,19 @@ class EpollServer
 {
 public:
     // Note: We ignore SIGPIPE so the server doesn't crash on broken sockets
-    EpollServer(unsigned int threadsCount)
-        : mThreadsCount(threadsCount), mMaxFds(GetMaxFiles()) { signal(SIGPIPE, SIG_IGN); }
+    EpollServer(unsigned int threadsCount, int backlog = SOMAXCONN)
+        : mThreadsCount(threadsCount), 
+          mMaxFds(GetMaxFiles()),
+          mBacklog(backlog) { signal(SIGPIPE, SIG_IGN); }
     virtual ~EpollServer() { Stop(); }
 
-    bool Start(unsigned short port, int backlog = DEFAULT_BACKLOG);
-    bool Start(const char* unixPath, int backlog = DEFAULT_BACKLOG);
+    void AddListener(uint16_t port);
+    void AddListener(const char* socketPath);
+
+    bool Start();
+    bool Start(unsigned short port);
+    bool Start(const char* socketPath);
+
     void Stop();
 
     void SetVerbose(bool verbose) { mVerbose = verbose; }
@@ -79,14 +85,24 @@ protected:
     virtual void OnInfo(const char* fname, int lineNum, const std::string& info) const;
 
 private:
+    struct Listener
+    {
+        int domain{0};          // Holds standard system defines: AF_INET, AF_INET6, or AF_UNIX
+        uint16_t port{0};       // Used for TCP (0 for UNIX)
+        std::string address;    // IP:Port or Path for debugging/logging
+        int unixFd{-1};         // UNIX socket fd
+        std::string unixPath;   // UNIX socket path
+        bool isAbstract{false}; // UNIX socket in abstract namespace
+    };
+
     int GetMaxFiles();
-    int SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg);
-    int SetupUnixSocket(const char* unixPath, int backlog, std::string& errMsg);
+    int SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg) const;
+    int SetupUnixSocket(const std::string& unixPath, int backlog, bool isAbstract, std::string& errMsg) const;
     void ReactorLoop();
-    bool IsUnixSocket() const { return (mUnixDomainSocket >= 0); }
-    bool IsTcpSocket() const { return !IsUnixSocket(); }
     bool FlushOutboundBuffer(std::shared_ptr<ClientContext>& client);
     bool Send(ClientContext* client, const void* data, size_t len);
+    bool InitThreadListeners(std::vector<int>& localListenerFds);
+    void CloseThreadTcpListeners(const std::vector<int>& localListenerFds);
 
     enum class RecvStatus
     {
@@ -103,12 +119,17 @@ private:
     std::atomic<bool> mServerRunning{false};
     std::atomic<uint64_t> mNextConnectionId{1};
     std::vector<std::thread> mThreads;
+    
+    std::vector<Listener> mListeners; // The collection of active listeners. 
 
-    unsigned short mPort{0};
-    int mUnixDomainSocket{-1};
-    std::string mActiveUnixPath;
-    int mBacklog{DEFAULT_BACKLOG};
+    // unsigned short mPort{0};
+    // int mUnixDomainSocket{-1};
+    // std::string mActiveUnixPath;
     int mMaxFds{0};
+    int mBacklog{SOMAXCONN};
+
+    constexpr static uint64_t EPOLLED_LISTEN_FLAG = static_cast<uint64_t>(1) << 63;
+    constexpr static uint64_t EPOLLED_FD_MASK = 0xFFFFFFFFULL;
 
 protected:
     bool mVerbose{false};
@@ -134,29 +155,73 @@ inline void EpollServer::OnInfo(const char* fname, int lineNum, const std::strin
     std::cout << "Info: " << fname << ":" << lineNum << " " << info << std::endl;
 }
 
-inline bool EpollServer::Start(unsigned short port, int backlog)
+inline void EpollServer::AddListener(uint16_t port)
 {
-    if(!OnInit())
+    // Search the vector for any existing TCP listener matching this port
+    auto it = std::find_if(mListeners.begin(), mListeners.end(), [port](const Listener& l)
     {
-        OnError(__FNAME__, __LINE__, "Initialization failed: OnInit() returned false");
-        return false;
+        return l.domain == AF_INET && l.port == port;
+    });
+
+    if(it != mListeners.end())
+    {
+        OnError(__FNAME__, __LINE__, "Configuration rejected: TCP port " + std::to_string(port) + " is already configured.");
+        return;
     }
 
-    mPort = port;
-    mBacklog = backlog;
-    mServerRunning = true;
-
-    std::stringstream ss;
-    ss << "Starting Server on port " << port << " with " << mThreadsCount << " threads...";
-    OnInfo(__FNAME__, __LINE__, ss.str());
-
-    for(unsigned int i = 0; i < mThreadsCount; ++i)
-        mThreads.emplace_back([this]() { ReactorLoop(); });
-
-    return true;
+    Listener listener;
+    listener.domain = AF_INET;
+    listener.port = port;
+    mListeners.push_back(listener);
 }
 
-inline bool EpollServer::Start(const char* unixPath, int backlog)
+inline void EpollServer::AddListener(const char* socketPath)
+{
+    bool isAbstract = false;
+    std::string unixPath;
+    if(socketPath[0] == '@' || socketPath[0] == '\0')
+    {
+        isAbstract = true;
+        unixPath = socketPath + 1;
+    }
+    else
+    {
+        isAbstract = false;
+        unixPath = socketPath;
+    }
+
+    // Search the vector for any existing UNIX listener matching this file path
+    auto it = std::find_if(mListeners.begin(), mListeners.end(), [&unixPath](const Listener& l)
+    {
+        return l.domain == AF_UNIX && l.unixPath == unixPath;
+    });
+
+    if(it != mListeners.end())
+    {
+        OnError(__FNAME__, __LINE__, "Configuration rejected: UNIX socket path '" + unixPath + "' is already configured.");
+        return;
+    }
+
+    Listener listener;
+    listener.domain = AF_UNIX;
+    listener.unixPath = unixPath;
+    listener.isAbstract = isAbstract;
+    mListeners.push_back(listener);
+}
+
+inline bool EpollServer::Start(unsigned short port)
+{
+    AddListener(port);
+    return Start();
+}
+
+inline bool EpollServer::Start(const char* socketPath)
+{
+    AddListener(socketPath);
+    return Start();
+}
+
+inline bool EpollServer::Start()
 {
     if(!OnInit())
     {
@@ -164,19 +229,64 @@ inline bool EpollServer::Start(const char* unixPath, int backlog)
         return false;
     }
 
-    std::string errMsg;
-    mUnixDomainSocket = SetupUnixSocket(unixPath, backlog, errMsg);
-    if(mUnixDomainSocket < 0)
+    if(mListeners.empty())
     {
-        OnError(__FNAME__, __LINE__, errMsg);
+        OnError(__FNAME__, __LINE__, "Cannot start server: No listeners have been added.");
         return false;
     }
-    mBacklog = backlog;
+
+    // Process and initialize global listeners (like UNIX domain sockets)
+    for(auto& listener : mListeners)
+    {
+        if(listener.domain == AF_UNIX)
+        {
+            // Call your original UNIX socket initialization method here on the main thread.
+            // Note: Update your SetupUnixSocket signature to accept your backlog configuration!
+            std::string errMsg;
+            listener.unixFd = SetupUnixSocket(listener.unixPath.c_str(), mBacklog, listener.isAbstract, errMsg);
+
+            if(listener.unixFd == -1)
+            {
+                OnError(__FNAME__, __LINE__, errMsg);
+
+                // Clean up any previously opened UNIX sockets before aborting
+                for(auto& clean : mListeners)
+                {
+                    if(clean.unixFd != -1)
+                        ::close(clean.unixFd);
+                }
+                return false;
+            }
+        }
+    }
+
+    // Sockets are validated and ready
     mServerRunning = true;
 
-    std::stringstream ss;
-    ss << "Starting Server on Unix Domain Socket '" << mActiveUnixPath << "' with " << mThreadsCount << " threads...";
-    OnInfo(__FNAME__, __LINE__, ss.str());
+    for(auto& listener : mListeners)
+    {
+        std::stringstream ss;
+        if(listener.domain == AF_UNIX)
+        {
+            ss << "Starting Server on Unix Domain Socket '" << listener.unixPath << "' with " << mThreadsCount << " threads...";
+        }
+        else
+        {
+            ss << "Starting Server on port " << listener.port << " with " << mThreadsCount << " threads...";
+        }
+        OnInfo(__FNAME__, __LINE__, ss.str());
+    }
+
+    // AI Review Note: This sequential consistency memory fence is added
+    // to eliminate a subtle multithreaded initialization race condition. 
+    // While 'mServerRunning' is atomic, 'mListeners' is a plain std::vector.
+    // Without this fence, highly optimizing compilers or relaxed CPU architectures
+    // (like ARM64) can theoretically reorder memory writes, spawning worker threads
+    // before all local configurations (such as the main thread's updates to listener.unixFd)
+    // are fully flushed down from the local CPU cache rows into globally shared memory. 
+    // This fence establishes a strict data-synchronization barrier, guaranteeing total 
+    // cross-thread visibility of the initialization state before the workers boot.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
     for(unsigned int i = 0; i < mThreadsCount; ++i)
         mThreads.emplace_back([this]() { ReactorLoop(); });
@@ -186,6 +296,9 @@ inline bool EpollServer::Start(const char* unixPath, int backlog)
 
 inline void EpollServer::Stop()
 {
+    if(!mServerRunning)
+        return;
+
     mServerRunning = false;
 
     for(auto& t : mThreads)
@@ -195,15 +308,20 @@ inline void EpollServer::Stop()
     }
     mThreads.clear();
 
-    if(IsUnixSocket())
+    // Main thread safely cleans up global shared assets now that threads are dead
+    for(auto& listener : mListeners)
     {
-        if(mUnixDomainSocket >= 0)
-            close(mUnixDomainSocket);
-        mUnixDomainSocket = -1;
+        if(listener.domain == AF_UNIX && listener.unixFd != -1)
+        {
+            ::close(listener.unixFd);
 
-        if(!mActiveUnixPath.empty())
-            unlink(mActiveUnixPath.c_str());
-        mActiveUnixPath.clear();
+            // Unlink the file socket from the file system namespace
+            if(!listener.unixPath.empty())
+            {
+                ::unlink(listener.unixPath.c_str());
+            }
+            listener.unixFd = -1;
+        }
     }
 }
 
@@ -216,35 +334,40 @@ inline void EpollServer::ReactorLoop()
         return;
     }
 
-    std::unordered_map<int, std::shared_ptr<ClientContext>> localClients;
-    localClients.reserve(1024); // Start with a reasonable baseline
-
-    int listenFd = (IsUnixSocket() ? mUnixDomainSocket : -1);
-    if(listenFd == -1)
+    // Inialize all listeneres
+    std::vector<int> localListenerFds;
+    if(!InitThreadListeners(localListenerFds))
     {
-        std::string errMsg;
-        listenFd = SetupTcpSocket(mPort, mBacklog, errMsg);
-        if(listenFd < 0)
+        OnError(__FNAME__, __LINE__, "Thread failed to initialize all requested listeners.");
+        ::close(threadEpollFd);
+        return; // Exit the thread
+    }
+
+    // Add listeners to to the epool
+    for(int listenFd : localListenerFds)
+    {
+        struct epoll_event ev = {};
+        ev.events = EPOLLIN | EPOLLET;
+        
+        // Use event.data.u64 field to pack both the socket and listener boollean flag.
+        // Set the least significant bits for the socket file descriptor and 
+        // the highest bit for the boolean flag.
+        // Note: Mask with 0xFFFFFFFFULL ensures we only take the 32 bits of the FD
+        // and don't accidentally pollute the 63rd bit via sign extension.
+        ev.data.u64 = (static_cast<uint64_t>(listenFd) & EPOLLED_FD_MASK) | EPOLLED_LISTEN_FLAG;
+
+        if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, listenFd, &ev) == -1)
         {
-            OnError(__FNAME__, __LINE__, errMsg);
-            close(threadEpollFd);
-            return;
+            OnError(__FNAME__, __LINE__, "epoll_ctl ADD failed for listener FD " + std::to_string(listenFd) + ": " + std::string(strerror(errno)));
+            CloseThreadTcpListeners(localListenerFds);
+            ::close(threadEpollFd);
+            return; // Exit the thread
         }
     }
 
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.u32 = static_cast<uint32_t>(listenFd);
-
-    if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, listenFd, &ev) == -1)
-    {
-        OnError(__FNAME__, __LINE__, "epoll_ctl(listenFd) failed: " + std::string(strerror(errno)));
-        if(IsTcpSocket())
-            close(listenFd);
-        close(threadEpollFd);
-        return;
-    }
-
+    std::unordered_map<int, std::shared_ptr<ClientContext>> localClients;
+    localClients.reserve(1024); // Start with a reasonable baseline
+    
     // Epool event processing loop
     struct epoll_event evs[DEFAULT_MAX_EVENTS];
     auto lastCleanupTime = std::chrono::steady_clock::now();
@@ -259,17 +382,22 @@ inline void EpollServer::ReactorLoop()
             break;
         }
 
-        for(int i = 0; i < numEvents; ++i)
+        for(int i = 0; i < numEvents && mServerRunning; ++i)
         {
             uint32_t events = evs[i].events;
-            int eventFd = static_cast<int>(evs[i].data.u32);
 
-            if(eventFd == listenFd)
+            // Unpack event.data.u64 field to the socket file descriptor and listener boollean flag:
+            // - If the highest bit is set, it's a listener
+            // - Erase the highest bit (boolean flag bit) to unpack the socket
+            bool isListener = (evs[i].data.u64 & EPOLLED_LISTEN_FLAG) != 0;
+            int eventFd = static_cast<int>(evs[i].data.u64 & EPOLLED_FD_MASK); // We only need the bottom 32 bits
+
+            if(isListener)
             {
-                while(mServerRunning)
+                while(true)
                 {
                     // Use accept4 to set non-blocking and cloexec immediately
-                    int clientFd = accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    int clientFd = accept4(eventFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
                     if(clientFd == -1)
                     {
@@ -299,7 +427,7 @@ inline void EpollServer::ReactorLoop()
                     // Register the new client with ONESHOT and ET (Edge Triggering)
                     struct epoll_event cev;
                     cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
-                    cev.data.u32 = static_cast<uint32_t>(clientFd);
+                    cev.data.u64 = (static_cast<uint64_t>(clientFd) & EPOLLED_FD_MASK);
 
                     if(epoll_ctl(threadEpollFd, EPOLL_CTL_ADD, clientFd, &cev) == -1)
                     {
@@ -341,7 +469,6 @@ inline void EpollServer::ReactorLoop()
                 // Inbound processing block
                 if(keepAlive && (events & EPOLLIN))
                 {
-                    std::string recvErr;
                     auto status = Receive(client);
 
                     // Always process data if we have it, regardless of status
@@ -357,7 +484,6 @@ inline void EpollServer::ReactorLoop()
                     }
                     else if(status == RecvStatus::ERROR)
                     {
-                        OnError(__FNAME__, __LINE__, "Receive error: " + recvErr);
                         keepAlive = false;
                     }
 
@@ -382,7 +508,7 @@ inline void EpollServer::ReactorLoop()
                     cev.events = EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLONESHOT;
                     if(client->wantsWrite)
                         cev.events |= EPOLLOUT;
-                    cev.data.u32 = static_cast<uint32_t>(clientFd);
+                    cev.data.u64 = (static_cast<uint64_t>(clientFd) & EPOLLED_FD_MASK);
 
                     if(epoll_ctl(threadEpollFd, EPOLL_CTL_MOD, clientFd, &cev) == -1)
                     {
@@ -427,12 +553,82 @@ inline void EpollServer::ReactorLoop()
     }
     localClients.clear();
 
-    if(IsTcpSocket() && listenFd >= 0)
-        close(listenFd);
+    // Clean up 
+    CloseThreadTcpListeners(localListenerFds);
     close(threadEpollFd);
 }
 
-inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg)
+inline bool EpollServer::InitThreadListeners(std::vector<int>& listenerFds)
+{
+    bool isInitialized = true;
+    
+    for(const auto& listener : mListeners)
+    {
+        int listenFd = -1;
+
+        if(listener.domain == AF_INET)
+        {
+            std::string errMsg;
+            listenFd = SetupTcpSocket(listener.port, mBacklog, errMsg);
+            if(listenFd < 0)
+            {
+                OnError(__FNAME__, __LINE__, errMsg);
+                isInitialized = false;
+                break;
+            }
+        }
+        else if(listener.domain == AF_UNIX)
+        {
+            // Bind to the shared UNIX socket descriptor created in the Start phase
+            listenFd = listener.unixFd;
+            if(listenFd < 0)
+            {
+                OnError(__FNAME__, __LINE__, "Thread missing valid shared UNIX socket descriptor.");
+                isInitialized = false;
+                break;
+            }
+        }
+        else
+        {
+            // Explicit fallback for corrupted or unsupported socket domains
+            OnError(__FNAME__, __LINE__, "Encountered completely unsupported socket domain: " + std::to_string(listener.domain));
+            isInitialized = false;
+            break;
+        }
+
+        listenerFds.push_back(listenFd);
+    }
+
+    if(!isInitialized || listenerFds.size() != mListeners.size())
+    {
+        CloseThreadTcpListeners(listenerFds);
+    }
+
+    return isInitialized;
+}
+
+inline void EpollServer::CloseThreadTcpListeners(const std::vector<int>& localListenerFds)
+{
+    // Clean up all TCP listening sockets owned by this thread
+    for(int fd : localListenerFds)
+    {
+        int domain = 0;
+        socklen_t len = sizeof(domain);
+        
+        // Check the domain natively via the kernel
+        if(getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &len) == 0)
+        {
+            // Only close network sockets (TCP) created by this thread.
+            // Leave the shared UNIX socket descriptor open for other threads/destructor.
+            if(domain == AF_INET || domain == AF_INET6)
+            {
+                ::close(fd);
+            }
+        }
+    }
+}
+
+inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::string& errMsg) const
 {
     int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if(sock == -1)
@@ -458,7 +654,7 @@ inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::st
         return -1;
     }
 
-    if(listen(sock, backlog) == -1)
+    if(listen(sock, mBacklog) == -1)
     {
         errMsg = "listen(AF_INET) failed: " + std::string(strerror(errno));
         close(sock);
@@ -468,28 +664,24 @@ inline int EpollServer::SetupTcpSocket(unsigned short port, int backlog, std::st
     return sock;
 }
 
-inline int EpollServer::SetupUnixSocket(const char* unixPath, int backlog, std::string& errMsg)
+inline int EpollServer::SetupUnixSocket(const std::string& unixPath, int backlog, bool isAbstract, std::string& errMsg) const
 {
     struct sockaddr_un addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     socklen_t addrLen = 0;
 
-    if(unixPath[0] == '@' || unixPath[0] == '\0')
+    if(isAbstract)
     {
-        const char* name = unixPath + 1;
-        size_t nameLen = strlen(name);
-        addr.sun_path[0] = '\0';
-        std::memcpy(addr.sun_path + 1, name, nameLen);
-        addrLen = offsetof(struct sockaddr_un, sun_path) + 1 + nameLen;
-        mActiveUnixPath.assign(name, nameLen);
+        addr.sun_path[0] = '\0';    // Leading byte must be '\0
+        std::memcpy(addr.sun_path + 1, unixPath.data(), unixPath.size());
+        addrLen = offsetof(struct sockaddr_un, sun_path) + 1 + unixPath.size();
     }
     else
     {
-        unlink(unixPath);
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", unixPath);
+        ::unlink(unixPath.c_str());
+        std::memcpy(addr.sun_path, unixPath.data(), unixPath.size());
         addrLen = sizeof(struct sockaddr_un);
-        mActiveUnixPath = unixPath;
     }
 
     int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);

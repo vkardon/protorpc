@@ -97,8 +97,9 @@ int main()
     server.SetMaxReceiveMessageSize(4 * 1024 * 1024);   // 4MB
     //server.SetVerbose(true);
 
-    //if(!server.Start(8080))
-    if(!server.Start("\0protoserver_domain_socket.sock"))
+    server.AddListener(8080);
+    server.AddListener("\0protoserver_domain_socket.sock");
+    if(!server.Start())
     {
         std::cerr << "Failed to start the epoll server." << std::endl;
         return 1;
